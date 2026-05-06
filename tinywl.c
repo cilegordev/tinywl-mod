@@ -171,17 +171,27 @@ static void keyboard_handle_modifiers(
 		&keyboard->wlr_keyboard->modifiers);
 }
 
-static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
+static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym,
+		uint32_t modifiers) {
 	/*
 	 * Here we handle compositor keybindings. This is when the compositor is
 	 * processing keys, rather than passing them on to the client for its own
 	 * processing.
 	 *
-	 * This function assumes Alt is held down.
+	 * This function handles both Alt and Super (Logo) modifier keybindings.
 	 */
 	switch (sym) {
 	case XKB_KEY_Escape:
 		wl_display_terminate(server->wl_display);
+		break;
+	case XKB_KEY_Return:
+		/* Super+Enter: launch xfce4-terminal */
+		if (modifiers & WLR_MODIFIER_LOGO) {
+			if (fork() == 0) {
+				execl("/bin/sh", "/bin/sh", "-c", "xfce4-terminal", (char *)NULL);
+				_exit(EXIT_FAILURE);
+			}
+		}
 		break;
 	case XKB_KEY_F1:
 		/* Cycle to the next toplevel */
@@ -216,12 +226,12 @@ static void keyboard_handle_key(
 
 	bool handled = false;
 	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
-	if ((modifiers & WLR_MODIFIER_ALT) &&
+	if ((modifiers & (WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)) &&
 			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		/* If alt is held down and this button was _pressed_, we attempt to
-		 * process it as a compositor keybinding. */
+		/* If Alt or Super (Logo) is held down and this button was _pressed_,
+		 * we attempt to process it as a compositor keybinding. */
 		for (int i = 0; i < nsyms; i++) {
-			handled = handle_keybinding(server, syms[i]);
+			handled = handle_keybinding(server, syms[i], modifiers);
 		}
 	}
 
