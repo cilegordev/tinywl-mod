@@ -678,6 +678,11 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 		wlr_output);
 	struct wlr_scene_output *scene_output = wlr_scene_output_create(server->scene, wlr_output);
 	wlr_scene_output_layout_add_output(server->scene_layout, l_output, scene_output);
+
+	/* Load xcursor theme at this output's scale factor (important for HiDPI),
+	 * then refresh the cursor image so it renders correctly on this output. */
+	wlr_xcursor_manager_load(server->cursor_mgr, wlr_output->scale);
+	wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
 }
 
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
@@ -898,6 +903,14 @@ int main(int argc, char *argv[]) {
 	wlr_log_init(WLR_DEBUG, NULL);
 	char *startup_cmd = NULL;
 
+	/*
+	 * Force wlroots to use software cursors rendered by the GPU/renderer
+	 * instead of the hardware cursor plane. This ensures the cursor is always
+	 * visible regardless of GPU/driver support for hardware cursor planes.
+	 * Must be set before the backend is created.
+	 */
+	setenv("WLR_NO_HARDWARE_CURSORS", "1", 1);
+
 	int c;
 	while ((c = getopt(argc, argv, "s:h")) != -1) {
 		switch (c) {
@@ -1066,6 +1079,12 @@ int main(int argc, char *argv[]) {
 	/* Set the WAYLAND_DISPLAY environment variable to our socket and run the
 	 * startup command if requested. */
 	setenv("WAYLAND_DISPLAY", socket, true);
+
+	/* Load the xcursor theme and set the default cursor image immediately.
+	 * Without this, the cursor image won't appear until the first pointer
+	 * motion event triggers process_cursor_motion(). */
+	wlr_xcursor_manager_load(server.cursor_mgr, 1);
+	wlr_cursor_set_xcursor(server.cursor, server.cursor_mgr, "default");
 	if (startup_cmd) {
 		if (fork() == 0) {
 			execl("/bin/sh", "/bin/sh", "-c", startup_cmd, (void *)NULL);
