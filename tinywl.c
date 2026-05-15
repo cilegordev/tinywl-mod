@@ -619,6 +619,32 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
 
+	/* Center the new toplevel on the first available output. */
+	struct tinywl_server *server = toplevel->server;
+	struct tinywl_output *output;
+	if (!wl_list_empty(&server->outputs)) {
+		output = wl_container_of(server->outputs.next, output, link);
+
+		/* Get the output's effective resolution (accounts for transforms/scale). */
+		int out_width = 0, out_height = 0;
+		wlr_output_effective_resolution(output->wlr_output, &out_width, &out_height);
+
+		/* Get the output's position in the layout. */
+		struct wlr_box out_box;
+		wlr_output_layout_get_box(server->output_layout,
+			output->wlr_output, &out_box);
+
+		/* Get the surface geometry (the actual rendered area). */
+		struct wlr_box geo_box;
+		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
+
+		/* Compute centered position, correcting for the geometry offset. */
+		int x = out_box.x + (out_width  - geo_box.width)  / 2 - geo_box.x;
+		int y = out_box.y + (out_height - geo_box.height) / 2 - geo_box.y;
+
+		wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+	}
+
 	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
 }
 
