@@ -6,105 +6,17 @@
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
-#include <wayland-server-core.h>
-#include <wlr/backend.h>
-#include <wlr/render/allocator.h>
-#include <wlr/render/wlr_renderer.h>
-#include <wlr/types/wlr_cursor.h>
-#include <wlr/types/wlr_compositor.h>
-#include <wlr/types/wlr_data_device.h>
-#include <wlr/types/wlr_input_device.h>
-#include <wlr/types/wlr_keyboard.h>
-#include <wlr/types/wlr_output.h>
-#include <wlr/types/wlr_output_layout.h>
-#include <wlr/types/wlr_pointer.h>
-#include <wlr/types/wlr_scene.h>
-#include <wlr/types/wlr_seat.h>
-#include <wlr/types/wlr_subcompositor.h>
-#include <wlr/types/wlr_xcursor_manager.h>
-#include <wlr/types/wlr_xdg_shell.h>
-#include <wlr/util/log.h>
+#include <linux/input-event-codes.h>
 #include <xkbcommon/xkbcommon.h>
 
-/* For brevity's sake, struct members are annotated where they are used. */
-enum tinywl_cursor_mode {
-	TINYWL_CURSOR_PASSTHROUGH,
-	TINYWL_CURSOR_MOVE,
-	TINYWL_CURSOR_RESIZE,
-};
+/*
+ * tinywl.h includes all wlr headers and defines
+ * struct tinywl_server, tinywl_output, tinywl_toplevel, tinywl_keyboard,
+ * and enum tinywl_cursor_mode.
+ */
+#include "tinywl.h"
+#include "menu.h"
 
-struct tinywl_server {
-	struct wl_display *wl_display;
-	struct wlr_backend *backend;
-	struct wlr_renderer *renderer;
-	struct wlr_allocator *allocator;
-	struct wlr_scene *scene;
-	struct wlr_scene_output_layout *scene_layout;
-
-	struct wlr_xdg_shell *xdg_shell;
-	struct wl_listener new_xdg_surface;
-	struct wl_list toplevels;
-
-	struct wlr_cursor *cursor;
-	struct wlr_xcursor_manager *cursor_mgr;
-	struct wl_listener cursor_motion;
-	struct wl_listener cursor_motion_absolute;
-	struct wl_listener cursor_button;
-	struct wl_listener cursor_axis;
-	struct wl_listener cursor_frame;
-
-	struct wlr_seat *seat;
-	struct wl_listener new_input;
-	struct wl_listener request_cursor;
-	struct wl_listener request_set_selection;
-	struct wl_list keyboards;
-	enum tinywl_cursor_mode cursor_mode;
-	struct tinywl_toplevel *grabbed_toplevel;
-	double grab_x, grab_y;
-	struct wlr_box grab_geobox;
-	uint32_t resize_edges;
-
-	struct wlr_output_layout *output_layout;
-	struct wl_list outputs;
-	struct wl_listener new_output;
-
-	/* Alt+Tab state */
-	bool alt_tab_active;       /* true while Alt is held during Alt+Tab cycling */
-	int alt_tab_index;         /* current index in the toplevel list */
-};
-
-struct tinywl_output {
-	struct wl_list link;
-	struct tinywl_server *server;
-	struct wlr_output *wlr_output;
-	struct wl_listener frame;
-	struct wl_listener request_state;
-	struct wl_listener destroy;
-};
-
-struct tinywl_toplevel {
-	struct wl_list link;
-	struct tinywl_server *server;
-	struct wlr_xdg_toplevel *xdg_toplevel;
-	struct wlr_scene_tree *scene_tree;
-	struct wl_listener map;
-	struct wl_listener unmap;
-	struct wl_listener destroy;
-	struct wl_listener request_move;
-	struct wl_listener request_resize;
-	struct wl_listener request_maximize;
-	struct wl_listener request_fullscreen;
-};
-
-struct tinywl_keyboard {
-	struct wl_list link;
-	struct tinywl_server *server;
-	struct wlr_keyboard *wlr_keyboard;
-
-	struct wl_listener modifiers;
-	struct wl_listener key;
-	struct wl_listener destroy;
-};
 
 static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
@@ -166,46 +78,7 @@ static void keyboard_handle_modifiers(
 		&keyboard->wlr_keyboard->modifiers);
 }
 
-/*
- * Cycle through toplevels for Alt+Tab.
- * direction: +1 = forward (Tab), -1 = backward (Shift+Tab)
- */
-static void alt_tab_cycle(struct tinywl_server *server, int direction) {
-	int count = wl_list_length(&server->toplevels);
-	if (count < 2) {
-		return;
-	}
-
-	/* Advance index */
-	server->alt_tab_index = (server->alt_tab_index + direction + count) % count;
-
-	/* Walk the list to find the toplevel at alt_tab_index.
-	 * The list head is the most-recently-focused window (index 0). */
-	struct tinywl_toplevel *target = NULL;
-	struct tinywl_toplevel *iter;
-	int i = 0;
-	wl_list_for_each(iter, &server->toplevels, link) {
-		if (i == server->alt_tab_index) {
-			target = iter;
-			break;
-		}
-		i++;
-	}
-
-	if (target) {
-		focus_toplevel(target, target->xdg_toplevel->base->surface);
-	}
-}
-
-static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym, uint32_t modifiers);
-	/*
-	 * Here we handle compositor keybindings. This is when the compositor is
-	 * processing keys, rather than passing them on to the client for its own
-	 * processing.
-	 *
-	 * This function assumes Alt is held down.
-	 */
-static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym, uint32_t modifiers) {
+static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 	/*
 	 * Here we handle compositor keybindings. This is when the compositor is
 	 * processing keys, rather than passing them on to the client for its own
@@ -217,15 +90,6 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym, ui
 	case XKB_KEY_Escape:
 		wl_display_terminate(server->wl_display);
 		break;
-	case XKB_KEY_Return:
-		/* Super+Enter: launch xfce4-terminal */
-		if (modifiers & WLR_MODIFIER_LOGO) {
-			if (fork() == 0) {
-				execl("/bin/sh", "/bin/sh", "-c", "xfce4-terminal", (char *)NULL);
-				_exit(EXIT_FAILURE);
-			}
-		}
-		break;
 	case XKB_KEY_F1:
 		/* Cycle to the next toplevel */
 		if (wl_list_length(&server->toplevels) < 2) {
@@ -234,19 +98,6 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym, ui
 		struct tinywl_toplevel *next_toplevel =
 			wl_container_of(server->toplevels.prev, next_toplevel, link);
 		focus_toplevel(next_toplevel, next_toplevel->xdg_toplevel->base->surface);
-		break;
-	case XKB_KEY_Tab:
-		/* Alt+Tab: cycle forward through windows */
-		if (modifiers & WLR_MODIFIER_ALT) {
-			if (!server->alt_tab_active) {
-				/* First Tab press: start cycling, index 0 is current window,
-				 * so jump straight to index 1 (next window). */
-				server->alt_tab_active = true;
-				server->alt_tab_index = 0;
-			}
-			int direction = (modifiers & WLR_MODIFIER_SHIFT) ? -1 : 1;
-			alt_tab_cycle(server, direction);
-		}
 		break;
 	default:
 		return false;
@@ -272,28 +123,12 @@ static void keyboard_handle_key(
 
 	bool handled = false;
 	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
-
-	/*
-	 * Detect Alt key release to finalise Alt+Tab selection.
-	 * When the user lifts Alt, we reset the cycling state so the next
-	 * Alt+Tab press starts fresh from the now-focused window.
-	 */
-	if (server->alt_tab_active && event->state == WL_KEYBOARD_KEY_STATE_RELEASED) {
-		for (int i = 0; i < nsyms; i++) {
-			if (syms[i] == XKB_KEY_Alt_L || syms[i] == XKB_KEY_Alt_R) {
-				server->alt_tab_active = false;
-				server->alt_tab_index = 0;
-				break;
-			}
-		}
-	}
-
-	if ((modifiers & (WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)) &&
+	if ((modifiers & WLR_MODIFIER_ALT) &&
 			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		/* If alt is held down and this button was _pressed_, we attempt to
 		 * process it as a compositor keybinding. */
 		for (int i = 0; i < nsyms; i++) {
-			handled = handle_keybinding(server, syms[i], modifiers);
+			handled = handle_keybinding(server, syms[i]);
 		}
 	}
 
@@ -592,13 +427,35 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct tinywl_server *server =
 		wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
-	/* Notify the client with pointer focus that a button press has occurred */
-	wlr_seat_pointer_notify_button(server->seat,
-			event->time_msec, event->button, event->state);
+
 	double sx, sy;
 	struct wlr_surface *surface = NULL;
 	struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
 			server->cursor->x, server->cursor->y, &surface, &sx, &sy);
+
+	/*
+	 * Right-click (BTN_RIGHT) on background/root:
+	 * - If menu is already visible → close it
+	 * - If menu is not visible → show menu at cursor position
+	 */
+	if (event->button == BTN_RIGHT &&
+	    event->state  == WLR_BUTTON_PRESSED &&
+	    toplevel == NULL) {
+		if (server->menu && tinywl_menu_is_visible(server->menu)) {
+			tinywl_menu_hide(server->menu);
+		} else {
+			tinywl_menu_show(server->menu,
+				(int)server->cursor->x,
+				(int)server->cursor->y,
+				event->time_msec);
+		}
+		return;
+	}
+
+	/* Notify the client with pointer focus that a button press has occurred */
+	wlr_seat_pointer_notify_button(server->seat,
+			event->time_msec, event->button, event->state);
+
 	if (event->state == WLR_BUTTON_RELEASED) {
 		/* If you released any buttons, we exit interactive move/resize mode. */
 		reset_cursor_mode(server);
@@ -1052,6 +909,20 @@ int main(int argc, char *argv[]) {
 	wl_signal_add(&server.seat->events.request_set_selection,
 			&server.request_set_selection);
 
+	/*
+	 * Initialize right-click popup menu.
+	 * This menu replicates the system.twmrc "defops" menu from TWM,
+	 * triggered by a right-click on the background (root) –
+	 * analogous to "Button1 = : root : f.menu \"defops\"" in twmrc.
+	 */
+	server.menu = tinywl_menu_init(&server);
+	if (!server.menu) {
+		wlr_log(WLR_ERROR, "Failed to initialize menu");
+		wlr_backend_destroy(server.backend);
+		wl_display_destroy(server.wl_display);
+		return 1;
+	}
+
 	/* Add a Unix socket to the Wayland display. */
 	const char *socket = wl_display_add_socket_auto(server.wl_display);
 	if (!socket) {
@@ -1086,6 +957,7 @@ int main(int argc, char *argv[]) {
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
 	wl_display_destroy_clients(server.wl_display);
+	tinywl_menu_destroy(server.menu);
 	wlr_scene_node_destroy(&server.scene->tree.node);
 	wlr_xcursor_manager_destroy(server.cursor_mgr);
 	wlr_output_layout_destroy(server.output_layout);
