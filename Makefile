@@ -15,11 +15,11 @@ xdg-shell-protocol.h:
 	$(WAYLAND_SCANNER) server-header \
 		$(WAYLAND_PROTOCOLS)/stable/xdg-shell/xdg-shell.xml $@
 
-tinywl: tinywl.c menu.c tinywl.h xdg-shell-protocol.h
+tinywl: tinywl.c menu.c background.c tinywl.h xdg-shell-protocol.h
 	$(CC) $(CFLAGS) \
 		-g -Werror -I. \
 		-DWLR_USE_UNSTABLE \
-		-o $@ tinywl.c menu.c \
+		-o $@ tinywl.c menu.c background.c \
 		$(LIBS)
 
 clean:

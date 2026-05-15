@@ -39,6 +39,9 @@
 /* Forward declaration – defined in menu.c */
 struct tinywl_menu;
 
+/* Forward declaration – defined in background.c */
+struct tinywl_background;
+
 /* Cursor mode enum */
 typedef enum tinywl_cursor_mode {
     TINYWL_CURSOR_PASSTHROUGH,
@@ -85,6 +88,9 @@ struct tinywl_server {
 
     /* Right-click popup menu (analogous to twm Button1=root=f.menu, uses BTN_RIGHT) */
     struct tinywl_menu            *menu;
+
+    /* Wallpaper / desktop background */
+    struct tinywl_background      *background;
 };
 
 struct tinywl_output {

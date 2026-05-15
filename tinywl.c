@@ -16,6 +16,7 @@
  */
 #include "tinywl.h"
 #include "menu.h"
+#include "background.h"
 
 
 static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface *surface) {
@@ -1065,6 +1066,20 @@ int main(int argc, char *argv[]) {
 	/* Set the WAYLAND_DISPLAY environment variable to our socket and run the
 	 * startup command if requested. */
 	setenv("WAYLAND_DISPLAY", socket, true);
+
+	/*
+	 * Load and display the desktop wallpaper.  This must be called after
+	 * wlr_backend_start() (so at least one output is available) and after
+	 * setenv("WAYLAND_DISPLAY", …) (so the internal wl_shm client can
+	 * connect).  Creating the background node before the menu ensures it
+	 * sits below all other scene nodes.
+	 */
+	server.background = tinywl_background_create(&server);
+	if (!server.background) {
+		wlr_log(WLR_ERROR, "Failed to initialise background");
+		/* Non-fatal: compositor works fine without a background */
+	}
+
 	if (startup_cmd) {
 		if (fork() == 0) {
 			execl("/bin/sh", "/bin/sh", "-c", startup_cmd, (void *)NULL);
@@ -1081,6 +1096,7 @@ int main(int argc, char *argv[]) {
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
 	wl_display_destroy_clients(server.wl_display);
+	tinywl_background_destroy(server.background);
 	tinywl_menu_destroy(server.menu);
 	wlr_scene_node_destroy(&server.scene->tree.node);
 	wlr_xcursor_manager_destroy(server.cursor_mgr);
