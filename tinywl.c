@@ -446,6 +446,50 @@ static void server_cursor_motion_absolute(
 	process_cursor_motion(server, event->time_msec);
 }
 
+static void toggle_maximize(struct tinywl_toplevel *toplevel) {
+	struct tinywl_server *server = toplevel->server;
+
+	if (toplevel->maximized) {
+		/* Restore to saved geometry */
+		wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, false);
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
+			toplevel->saved_geometry.width,
+			toplevel->saved_geometry.height);
+		wlr_scene_node_set_position(&toplevel->scene_tree->node,
+			toplevel->saved_geometry.x,
+			toplevel->saved_geometry.y);
+		toplevel->maximized = false;
+	} else {
+		/* Save current geometry before maximizing */
+		struct wlr_box geo;
+		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
+		toplevel->saved_geometry.x = toplevel->scene_tree->node.x;
+		toplevel->saved_geometry.y = toplevel->scene_tree->node.y;
+		toplevel->saved_geometry.width  = geo.width;
+		toplevel->saved_geometry.height = geo.height;
+
+		/* Get output dimensions */
+		struct tinywl_output *output = NULL;
+		if (!wl_list_empty(&server->outputs)) {
+			output = wl_container_of(server->outputs.next, output, link);
+		}
+		int out_width = 0, out_height = 0;
+		struct wlr_box out_box = {0};
+		if (output) {
+			wlr_output_effective_resolution(output->wlr_output,
+				&out_width, &out_height);
+			wlr_output_layout_get_box(server->output_layout,
+				output->wlr_output, &out_box);
+		}
+
+		wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, out_width, out_height);
+		wlr_scene_node_set_position(&toplevel->scene_tree->node,
+			out_box.x, out_box.y);
+		toplevel->maximized = true;
+	}
+}
+
 static void server_cursor_button(struct wl_listener *listener, void *data) {
 	/* This event is forwarded by the cursor when a pointer emits a button
 	 * event. */
@@ -476,6 +520,38 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 		}
 		return;
 	}
+
+	/*
+	 * Double-click (BTN_LEFT) on the headerbar → toggle maximize.
+	 *
+	 * The headerbar is the CSD title bar at the very top of the window.
+	 * We detect it by checking that the click's surface-local Y coordinate
+	 * (sy) is within the top HEADERBAR_HEIGHT pixels of the surface geometry.
+	 * 400 ms is the standard double-click interval.
+	 */
+#define HEADERBAR_HEIGHT 40
+#define DOUBLE_CLICK_MS  400
+	if (event->button == BTN_LEFT &&
+	    event->state  == WLR_BUTTON_PRESSED &&
+	    toplevel != NULL) {
+		struct wlr_box geo;
+		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
+		/* sy is relative to the surface; geo.y accounts for CSD shadow offset */
+		bool on_headerbar = (sy - geo.y) < HEADERBAR_HEIGHT && (sy - geo.y) >= 0;
+		uint32_t dt = event->time_msec - toplevel->last_button_time_msec;
+		bool is_double = (dt > 0 && dt <= DOUBLE_CLICK_MS);
+
+		if (on_headerbar && is_double) {
+			/* Consume the double-click — don't forward to client */
+			toplevel->last_button_time_msec = 0;
+			focus_toplevel(toplevel, surface);
+			toggle_maximize(toplevel);
+			return;
+		}
+		toplevel->last_button_time_msec = event->time_msec;
+	}
+#undef HEADERBAR_HEIGHT
+#undef DOUBLE_CLICK_MS
 
 	/* Notify the client with pointer focus that a button press has occurred */
 	wlr_seat_pointer_notify_button(server->seat,
@@ -738,14 +814,11 @@ static void xdg_toplevel_request_resize(
 
 static void xdg_toplevel_request_maximize(
 		struct wl_listener *listener, void *data) {
-	/* This event is raised when a client would like to maximize itself,
-	 * typically because the user clicked on the maximize button on
-	 * client-side decorations. tinywl doesn't support maximization, but
-	 * to conform to xdg-shell protocol we still must send a configure.
-	 * wlr_xdg_surface_schedule_configure() is used to send an empty reply. */
+	/* Client requested maximize (e.g. via its own maximize button).
+	 * We honour it by toggling our maximize implementation. */
 	struct tinywl_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_maximize);
-	wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+	toggle_maximize(toplevel);
 }
 
 static void xdg_toplevel_request_fullscreen(

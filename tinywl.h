@@ -108,6 +108,13 @@ struct tinywl_toplevel {
     struct wl_listener          request_resize;
     struct wl_listener          request_maximize;
     struct wl_listener          request_fullscreen;
+
+    /* Maximize state */
+    bool            maximized;
+    struct wlr_box  saved_geometry; /* x,y,width,height before maximize */
+
+    /* Double-click detection on headerbar */
+    uint32_t        last_button_time_msec;
 };
 
 struct tinywl_keyboard {
