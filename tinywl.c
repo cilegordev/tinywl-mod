@@ -99,6 +99,30 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 			wl_container_of(server->toplevels.prev, next_toplevel, link);
 		focus_toplevel(next_toplevel, next_toplevel->xdg_toplevel->base->surface);
 		break;
+	case XKB_KEY_Tab:
+		/* Alt+Tab: cycle forward through toplevels (next window) */
+		if (wl_list_length(&server->toplevels) < 2) {
+			break;
+		}
+		struct tinywl_toplevel *next_tab =
+			wl_container_of(server->toplevels.prev, next_tab, link);
+		focus_toplevel(next_tab, next_tab->xdg_toplevel->base->surface);
+		break;
+	case XKB_KEY_ISO_Left_Tab:
+		/* Alt+Shift+Tab: cycle backward through toplevels (previous window) */
+		if (wl_list_length(&server->toplevels) < 2) {
+			break;
+		}
+		/* The toplevels list head is the currently focused window.
+		 * toplevels.next->next is the second in list (skip current),
+		 * which represents the "previous" window in reverse order. */
+		struct tinywl_toplevel *prev_tab =
+			wl_container_of(server->toplevels.next, prev_tab, link);
+		if (&prev_tab->link == &server->toplevels) {
+			break;
+		}
+		focus_toplevel(prev_tab, prev_tab->xdg_toplevel->base->surface);
+		break;
 	default:
 		return false;
 	}
@@ -126,7 +150,8 @@ static void keyboard_handle_key(
 	if ((modifiers & WLR_MODIFIER_ALT) &&
 			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		/* If alt is held down and this button was _pressed_, we attempt to
-		 * process it as a compositor keybinding. */
+		 * process it as a compositor keybinding.
+		 * Note: Alt+Shift+Tab is also handled here (XKB_KEY_ISO_Left_Tab). */
 		for (int i = 0; i < nsyms; i++) {
 			handled = handle_keybinding(server, syms[i]);
 		}
