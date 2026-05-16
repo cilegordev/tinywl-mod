@@ -214,6 +214,14 @@ struct tinywl_panel {
     struct wl_listener       cursor_button;
     struct wl_listener       cursor_motion;
     struct wl_event_source  *clock_timer;
+
+    /*
+     * Callbacks into tinywl.c for minimize / restore.
+     * Set by tinywl_panel_set_callbacks() after panel creation.
+     * This avoids a circular dependency between panel.c and tinywl.c.
+     */
+    void (*cb_minimize)(struct tinywl_toplevel *toplevel);
+    void (*cb_restore)(struct tinywl_toplevel *toplevel);
 };
 
 /* Forward declarations */
@@ -530,19 +538,32 @@ static void on_cursor_button(struct wl_listener *listener, void *data)
     struct tinywl_toplevel *tl = p->tasks[idx].toplevel;
     if (!tl) return;
 
-    /* Raise the window and transfer keyboard focus */
-    wlr_scene_node_raise_to_top(&tl->scene_tree->node);
-    tinywl_panel_raise_to_top(p);
-
-    struct wlr_surface *surface = tl->xdg_toplevel->base->surface;
-    struct wlr_keyboard *kb = wlr_seat_get_keyboard(p->server->seat);
-    wlr_xdg_toplevel_set_activated(tl->xdg_toplevel, true);
-    if (kb)
-        wlr_seat_keyboard_notify_enter(p->server->seat, surface,
-                                        kb->keycodes, kb->num_keycodes,
-                                        &kb->modifiers);
-    /* Update focus highlight */
-    tinywl_panel_on_focus(p, tl);
+    if (tl->minimized) {
+        /*
+         * Window is minimized — restore it: re-enable scene node, raise,
+         * and focus.  Calls back into tinywl.c via the function pointer
+         * stored in the panel (restore_toplevel).
+         */
+        tinywl_panel_restore_toplevel(p, tl);
+    } else if (tl == p->focused) {
+        /*
+         * Clicking the taskbar button of the already-focused window
+         * minimizes it (toggle behaviour, matching common desktop UX).
+         */
+        tinywl_panel_minimize_toplevel(p, tl);
+    } else {
+        /* Raise and focus the non-minimized window */
+        wlr_scene_node_raise_to_top(&tl->scene_tree->node);
+        tinywl_panel_raise_to_top(p);
+        struct wlr_surface *surface = tl->xdg_toplevel->base->surface;
+        struct wlr_keyboard *kb = wlr_seat_get_keyboard(p->server->seat);
+        wlr_xdg_toplevel_set_activated(tl->xdg_toplevel, true);
+        if (kb)
+            wlr_seat_keyboard_notify_enter(p->server->seat, surface,
+                                            kb->keycodes, kb->num_keycodes,
+                                            &kb->modifiers);
+        tinywl_panel_on_focus(p, tl);
+    }
 }
 
 /* Task listener callbacks */
@@ -711,6 +732,31 @@ void tinywl_panel_raise_to_top(struct tinywl_panel *p)
 {
     if (!p || !p->tree) return;
     wlr_scene_node_raise_to_top(&p->tree->node);
+}
+
+void tinywl_panel_set_callbacks(struct tinywl_panel *p,
+    void (*cb_minimize)(struct tinywl_toplevel *toplevel),
+    void (*cb_restore)(struct tinywl_toplevel *toplevel))
+{
+    if (!p) return;
+    p->cb_minimize = cb_minimize;
+    p->cb_restore  = cb_restore;
+}
+
+void tinywl_panel_restore_toplevel(struct tinywl_panel *p,
+                                    struct tinywl_toplevel *toplevel)
+{
+    if (!p || !toplevel || !p->cb_restore) return;
+    p->cb_restore(toplevel);
+    /* Update taskbar highlight after restore */
+    tinywl_panel_on_focus(p, toplevel);
+}
+
+void tinywl_panel_minimize_toplevel(struct tinywl_panel *p,
+                                     struct tinywl_toplevel *toplevel)
+{
+    if (!p || !toplevel || !p->cb_minimize) return;
+    p->cb_minimize(toplevel);
 }
 
 void tinywl_panel_destroy(struct tinywl_panel *p)

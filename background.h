@@ -32,7 +32,7 @@ extern "C" {
  *   -DBACKGROUND_IMAGE_PATH=\"/path/to/image.png\"
  */
 #ifndef BACKGROUND_IMAGE_PATH
-#define BACKGROUND_IMAGE_PATH "/usr/share/backgrounds/img0.png"
+#define BACKGROUND_IMAGE_PATH "/var/rootfs/img0.png"
 #endif
 
 struct tinywl_server;

@@ -116,6 +116,47 @@ int tinywl_panel_get_height(struct tinywl_panel *p);
 void tinywl_panel_raise_to_top(struct tinywl_panel *p);
 
 /**
+ * tinywl_panel_set_callbacks() – register minimize/restore callbacks.
+ *
+ * Must be called once after tinywl_panel_create(), passing pointers to
+ * minimize_toplevel() and restore_toplevel() in tinywl.c so the taskbar
+ * click handler can call back into the compositor without creating a
+ * circular include dependency.
+ *
+ * @p:          panel handle
+ * @cb_minimize: pointer to minimize_toplevel() in tinywl.c
+ * @cb_restore:  pointer to restore_toplevel() in tinywl.c
+ */
+void tinywl_panel_set_callbacks(struct tinywl_panel *p,
+    void (*cb_minimize)(struct tinywl_toplevel *toplevel),
+    void (*cb_restore)(struct tinywl_toplevel *toplevel));
+
+/**
+ * tinywl_panel_restore_toplevel() – restore a minimized window.
+ *
+ * Called by the taskbar click handler when the user clicks on the button
+ * of a minimized window.  Re-enables the scene node, raises it, and
+ * transfers keyboard focus.
+ *
+ * Internally calls restore_toplevel() in tinywl.c via the function pointer
+ * stored in the panel at creation time.
+ * Safe to call with p == NULL or toplevel == NULL.
+ */
+void tinywl_panel_restore_toplevel(struct tinywl_panel *p,
+                                    struct tinywl_toplevel *toplevel);
+
+/**
+ * tinywl_panel_minimize_toplevel() – minimize a window from the taskbar.
+ *
+ * Called by the taskbar click handler when the user clicks the button of
+ * the currently focused window (toggle-to-minimize behaviour).
+ * Internally calls minimize_toplevel() in tinywl.c.
+ * Safe to call with p == NULL or toplevel == NULL.
+ */
+void tinywl_panel_minimize_toplevel(struct tinywl_panel *p,
+                                     struct tinywl_toplevel *toplevel);
+
+/**
  * tinywl_panel_destroy() – release all panel resources.
  *
  * Call before wlr_scene_node_destroy() in the compositor shutdown path.

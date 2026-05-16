@@ -19,6 +19,10 @@
 #include "background.h"
 #include "panel.h"
 
+/* Forward declarations for minimize/restore (called back by panel.c) */
+void minimize_toplevel(struct tinywl_toplevel *toplevel);
+void restore_toplevel(struct tinywl_toplevel *toplevel);
+
 
 static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
@@ -128,6 +132,14 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 			break;
 		}
 		focus_toplevel(prev_tab, prev_tab->xdg_toplevel->base->surface);
+		break;
+	case XKB_KEY_m:
+		/* Alt+M: minimize the currently focused window */
+		if (!wl_list_empty(&server->toplevels)) {
+			struct tinywl_toplevel *cur =
+				wl_container_of(server->toplevels.next, cur, link);
+			minimize_toplevel(cur);
+		}
 		break;
 	default:
 		return false;
@@ -758,6 +770,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->request_resize.link);
 	wl_list_remove(&toplevel->request_maximize.link);
 	wl_list_remove(&toplevel->request_fullscreen.link);
+	wl_list_remove(&toplevel->request_minimize.link);
 
 	free(toplevel);
 }
@@ -823,6 +836,54 @@ static void xdg_toplevel_request_resize(
 	begin_interactive(toplevel, TINYWL_CURSOR_RESIZE, event->edges);
 }
 
+void minimize_toplevel(struct tinywl_toplevel *toplevel) {
+	/*
+	 * Hide the window by disabling its scene tree node.
+	 * The XDG-shell protocol has no minimized state — compositors simply
+	 * stop rendering the surface.  We store the state in toplevel->minimized
+	 * so the taskbar can show it as minimized and restore on click.
+	 */
+	if (toplevel->minimized)
+		return;
+	toplevel->minimized = true;
+	wlr_scene_node_set_enabled(&toplevel->scene_tree->node, false);
+	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, false);
+
+	/* Pass keyboard focus to the next visible (non-minimized) window */
+	struct tinywl_server *server = toplevel->server;
+	struct tinywl_toplevel *next = NULL;
+	struct tinywl_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t != toplevel && !t->minimized) {
+			next = t;
+			break;
+		}
+	}
+	if (next) {
+		focus_toplevel(next, next->xdg_toplevel->base->surface);
+	} else {
+		wlr_seat_keyboard_notify_clear_focus(server->seat);
+		tinywl_panel_on_focus(server->panel, NULL);
+	}
+}
+
+void restore_toplevel(struct tinywl_toplevel *toplevel) {
+	/*
+	 * Restore a minimized window: re-enable the scene node and focus it.
+	 * Called via the panel callback when the user clicks the taskbar button.
+	 */
+	if (!toplevel->minimized) {
+		/* Not minimized — just focus */
+		focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
+		return;
+	}
+	toplevel->minimized = false;
+	wlr_scene_node_set_enabled(&toplevel->scene_tree->node, true);
+	wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
+	tinywl_panel_raise_to_top(toplevel->server->panel);
+	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
+}
+
 static void xdg_toplevel_request_maximize(
 		struct wl_listener *listener, void *data) {
 	/* Client requested maximize (e.g. via its own maximize button).
@@ -838,6 +899,14 @@ static void xdg_toplevel_request_fullscreen(
 	struct tinywl_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_fullscreen);
 	wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+}
+
+static void xdg_toplevel_request_minimize(
+		struct wl_listener *listener, void *data) {
+	/* Client requested minimize via its own CSD minimize button */
+	struct tinywl_toplevel *toplevel =
+		wl_container_of(listener, toplevel, request_minimize);
+	minimize_toplevel(toplevel);
 }
 
 static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
@@ -892,6 +961,9 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 	toplevel->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
 	wl_signal_add(&xdg_toplevel->events.request_fullscreen,
 		&toplevel->request_fullscreen);
+	toplevel->request_minimize.notify = xdg_toplevel_request_minimize;
+	wl_signal_add(&xdg_toplevel->events.request_minimize,
+		&toplevel->request_minimize);
 }
 
 int main(int argc, char *argv[]) {
@@ -1101,6 +1173,8 @@ int main(int argc, char *argv[]) {
 		wlr_log(WLR_ERROR, "Failed to initialise panel");
 		/* Non-fatal */
 	}
+	/* Register minimize/restore callbacks so the taskbar can call back in */
+	tinywl_panel_set_callbacks(server.panel, minimize_toplevel, restore_toplevel);
 
 	if (startup_cmd) {
 		if (fork() == 0) {
