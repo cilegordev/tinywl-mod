@@ -100,7 +100,7 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 	case XKB_KEY_Escape:
 		wl_display_terminate(server->wl_display);
 		break;
-	case XKB_KEY_F1:
+	case XKB_KEY_Tab:
 		/* Cycle to the next toplevel */
 		if (wl_list_length(&server->toplevels) < 2) {
 			break;
@@ -108,38 +108,6 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 		struct tinywl_toplevel *next_toplevel =
 			wl_container_of(server->toplevels.prev, next_toplevel, link);
 		focus_toplevel(next_toplevel, next_toplevel->xdg_toplevel->base->surface);
-		break;
-	case XKB_KEY_Tab:
-		/* Alt+Tab: cycle forward through toplevels (next window) */
-		if (wl_list_length(&server->toplevels) < 2) {
-			break;
-		}
-		struct tinywl_toplevel *next_tab =
-			wl_container_of(server->toplevels.prev, next_tab, link);
-		focus_toplevel(next_tab, next_tab->xdg_toplevel->base->surface);
-		break;
-	case XKB_KEY_ISO_Left_Tab:
-		/* Alt+Shift+Tab: cycle backward through toplevels (previous window) */
-		if (wl_list_length(&server->toplevels) < 2) {
-			break;
-		}
-		/* The toplevels list head is the currently focused window.
-		 * toplevels.next->next is the second in list (skip current),
-		 * which represents the "previous" window in reverse order. */
-		struct tinywl_toplevel *prev_tab =
-			wl_container_of(server->toplevels.next, prev_tab, link);
-		if (&prev_tab->link == &server->toplevels) {
-			break;
-		}
-		focus_toplevel(prev_tab, prev_tab->xdg_toplevel->base->surface);
-		break;
-	case XKB_KEY_m:
-		/* Alt+M: minimize the currently focused window */
-		if (!wl_list_empty(&server->toplevels)) {
-			struct tinywl_toplevel *cur =
-				wl_container_of(server->toplevels.next, cur, link);
-			minimize_toplevel(cur);
-		}
 		break;
 	default:
 		return false;
@@ -165,13 +133,20 @@ static void keyboard_handle_key(
 
 	bool handled = false;
 	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
-	if ((modifiers & WLR_MODIFIER_ALT) &&
-			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		/* If alt is held down and this button was _pressed_, we attempt to
-		 * process it as a compositor keybinding.
-		 * Note: Alt+Shift+Tab is also handled here (XKB_KEY_ISO_Left_Tab). */
+	if (modifiers & WLR_MODIFIER_ALT) {
+		/* If alt is held down, check all states (press, repeat, release).
+		 * We suppress forwarding for any key that is a compositor keybinding
+		 * regardless of state — this prevents Tab spam reaching the client. */
 		for (int i = 0; i < nsyms; i++) {
-			handled = handle_keybinding(server, syms[i]);
+			if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+				handled = handle_keybinding(server, syms[i]);
+			} else {
+				/* For release/repeat: just suppress without acting */
+				xkb_keysym_t sym = syms[i];
+				if (sym == XKB_KEY_Tab || sym == XKB_KEY_Escape) {
+					handled = true;
+				}
+			}
 		}
 	}
 
