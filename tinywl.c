@@ -17,6 +17,7 @@
 #include "tinywl.h"
 #include "menu.h"
 #include "background.h"
+#include "panel.h"
 
 
 static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface *surface) {
@@ -48,8 +49,12 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface 
 	wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
 	wl_list_remove(&toplevel->link);
 	wl_list_insert(&server->toplevels, &toplevel->link);
+	/* Keep the panel always on top of every window */
+	tinywl_panel_raise_to_top(server->panel);
 	/* Activate the new surface */
 	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
+	/* Update the taskbar highlight to reflect the newly focused window */
+	tinywl_panel_on_focus(server->panel, toplevel);
 	/*
 	 * Tell the seat to have the keyboard enter this surface. wlroots will keep
 	 * track of this and automatically send key events to the appropriate
@@ -484,7 +489,8 @@ static void toggle_maximize(struct tinywl_toplevel *toplevel) {
 		}
 
 		wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
-		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, out_width, out_height);
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, out_width,
+			out_height - tinywl_panel_get_height(server->panel));
 		wlr_scene_node_set_position(&toplevel->scene_tree->node,
 			out_box.x, out_box.y);
 		toplevel->maximized = true;
@@ -722,6 +728,8 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 		wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
 	}
 
+	/* Register this window in the taskbar */
+	tinywl_panel_on_map(server->panel, toplevel);
 	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
 }
 
@@ -734,6 +742,8 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		reset_cursor_mode(toplevel->server);
 	}
 
+	/* Remove this window from the taskbar */
+	tinywl_panel_on_unmap(toplevel->server->panel, toplevel);
 	wl_list_remove(&toplevel->link);
 }
 
@@ -1080,6 +1090,18 @@ int main(int argc, char *argv[]) {
 		/* Non-fatal: compositor works fine without a background */
 	}
 
+	/*
+	 * Create the bottom panel (Weston-style taskbar).
+	 * Must be called after wlr_backend_start() (output geometry is known)
+	 * and after setenv("WAYLAND_DISPLAY", …) (internal wl_shm client needs it).
+	 * Created after background so the panel scene tree sits above the wallpaper.
+	 */
+	server.panel = tinywl_panel_create(&server);
+	if (!server.panel) {
+		wlr_log(WLR_ERROR, "Failed to initialise panel");
+		/* Non-fatal */
+	}
+
 	if (startup_cmd) {
 		if (fork() == 0) {
 			execl("/bin/sh", "/bin/sh", "-c", startup_cmd, (void *)NULL);
@@ -1096,6 +1118,7 @@ int main(int argc, char *argv[]) {
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
 	wl_display_destroy_clients(server.wl_display);
+	tinywl_panel_destroy(server.panel);
 	tinywl_background_destroy(server.background);
 	tinywl_menu_destroy(server.menu);
 	wlr_scene_node_destroy(&server.scene->tree.node);

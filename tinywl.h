@@ -42,6 +42,9 @@ struct tinywl_menu;
 /* Forward declaration – defined in background.c */
 struct tinywl_background;
 
+/* Forward declaration – defined in tinywl-panel.c */
+struct tinywl_panel;
+
 /* Cursor mode enum */
 typedef enum tinywl_cursor_mode {
     TINYWL_CURSOR_PASSTHROUGH,
@@ -91,6 +94,9 @@ struct tinywl_server {
 
     /* Wallpaper / desktop background */
     struct tinywl_background      *background;
+
+    /* Bottom taskbar panel (Weston-style) */
+    struct tinywl_panel           *panel;
 };
 
 struct tinywl_output {
