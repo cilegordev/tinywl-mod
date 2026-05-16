@@ -30,7 +30,7 @@ programs from within the compositor, as TinyWL does not support any custom
 keybindings. TinyWL supports the following keybindings:
 
 - `Alt+Escape`: Terminate the compositor
-- `Alt+F1`: Cycle between windows
+- `Alt+Tab`: Cycle between windows
 
 ## Limitations
 
@@ -43,3 +43,7 @@ Notable omissions from TinyWL:
 - Optional protocols, e.g. screen capture, primary selection, virtual
   keyboard, etc. Most of these are plug-and-play with wlroots, but they're
   omitted for brevity.
+
+## Extra Feature
+
+- `gsettings set org.gnome.desktop.wm.preferences button-layout ':minimize,maximize,close'`: Enable full headerbar
