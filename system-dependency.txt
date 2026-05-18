@@ -1,0 +1,16 @@
+$ gcc --version   
+gcc (GCC) 13.2.0
+Copyright (C) 2023 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+$ pkg-config --version                    
+2.0.2
+$ for p in wlroots wayland-client wayland-server xkbcommon cairo pango; do
+echo "$p $(pkg-config --modversion $p)"
+done
+wlroots 0.17.4
+wayland-client 1.22.0
+wayland-server 1.22.0
+xkbcommon 1.6.0
+cairo 1.18.0
+pango 1.51.2
