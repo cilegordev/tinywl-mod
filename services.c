@@ -44,9 +44,7 @@ struct tinywl_services {
     bool                         xwayland_ready_flag;
 };
 
-/* -------------------------------------------------------------------------
- * Internal helpers
- * ---------------------------------------------------------------------- */
+/* Internal helpers */
 
 /*
  * record_pid – store a child PID so we can kill it on shutdown.
@@ -139,13 +137,7 @@ static char *find_polkit_agent(void) {
     return NULL;
 }
 
-/* -------------------------------------------------------------------------
- * D-Bus session bus
- *
- * We launch dbus-daemon --session --print-address and read back the bus
- * address so we can export DBUS_SESSION_BUS_ADDRESS for all subsequent
- * child processes.  This is the same technique used by startx / xinit.
- * ---------------------------------------------------------------------- */
+/* D-Bus session bus */
 
 static pid_t start_dbus_session(void) {
     /* If a bus is already running (e.g. user session via systemd), honour it */
@@ -228,9 +220,7 @@ static pid_t start_dbus_session(void) {
     return pid;
 }
 
-/* -------------------------------------------------------------------------
- * XWayland
- * ---------------------------------------------------------------------- */
+/* XWayland  */
 
 static void handle_xwayland_ready(struct wl_listener *listener, void *data) {
     struct tinywl_services *svc =
@@ -289,9 +279,7 @@ static bool start_xwayland(struct tinywl_services *svc) {
     return true;
 }
 
-/* -------------------------------------------------------------------------
- * GVFS
- * ---------------------------------------------------------------------- */
+/* GVFS */
 
 static void start_gvfs(struct tinywl_services *svc) {
     /*
@@ -339,9 +327,7 @@ static void start_gvfs(struct tinywl_services *svc) {
     }
 }
 
-/* -------------------------------------------------------------------------
- * Polkit authentication agent
- * ---------------------------------------------------------------------- */
+/* Polkit authentication agent */
 
 static void start_polkit(struct tinywl_services *svc) {
     char *agent = find_polkit_agent();
@@ -358,9 +344,7 @@ static void start_polkit(struct tinywl_services *svc) {
     free(agent);
 }
 
-/* -------------------------------------------------------------------------
- * PulseAudio / PipeWire-pulse
- * ---------------------------------------------------------------------- */
+/* PulseAudio / PipeWire-pulse  */
 
 static void start_audio(struct tinywl_services *svc) {
     /*
@@ -417,9 +401,7 @@ static void start_audio(struct tinywl_services *svc) {
     }
 }
 
-/* -------------------------------------------------------------------------
- * XFCE settings daemon  (provides theme / DPI / keyboard settings)
- * ---------------------------------------------------------------------- */
+/* XFCE settings daemon  (provides theme / DPI / keyboard settings) */
 
 static void start_settings_daemon(struct tinywl_services *svc) {
     /*
@@ -448,9 +430,7 @@ static void start_settings_daemon(struct tinywl_services *svc) {
     }
 }
 
-/* -------------------------------------------------------------------------
- * AT-SPI accessibility bus  (required by GTK3+)
- * ---------------------------------------------------------------------- */
+/* AT-SPI accessibility bus  (required by GTK3+) */
 
 static void start_at_spi(struct tinywl_services *svc) {
     if (!program_exists("at-spi-bus-launcher"))
@@ -466,9 +446,7 @@ static void start_at_spi(struct tinywl_services *svc) {
         record_pid(svc, pid, "at-spi-bus-launcher");
 }
 
-/* -------------------------------------------------------------------------
- * dconf service (GSettings backend)
- * ---------------------------------------------------------------------- */
+/* dconf service (GSettings backend) */
 
 static void start_dconf(struct tinywl_services *svc) {
     if (!program_exists("dconf-service"))
@@ -479,9 +457,7 @@ static void start_dconf(struct tinywl_services *svc) {
         record_pid(svc, pid, "dconf-service");
 }
 
-/* -------------------------------------------------------------------------
- * Public API
- * ---------------------------------------------------------------------- */
+/* Public API */
 
 struct tinywl_services *tinywl_services_init(struct tinywl_server *server) {
     struct tinywl_services *svc = calloc(1, sizeof(*svc));
