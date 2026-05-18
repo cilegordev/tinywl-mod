@@ -36,6 +36,16 @@
 #include <wlr/util/log.h>
 #include <wlr/util/box.h>
 
+/*
+ * XWayland support (wlroots 0.17 built with xwayland).
+ * Guard with TINYWL_HAS_XWAYLAND so the Makefile can disable it if the
+ * installed wlroots was built without xwayland support.
+ */
+#ifndef TINYWL_NO_XWAYLAND
+#include <wlr/xwayland.h>
+#define TINYWL_HAS_XWAYLAND 1
+#endif
+
 /* Forward declaration – defined in menu.c */
 struct tinywl_menu;
 
@@ -44,6 +54,9 @@ struct tinywl_background;
 
 /* Forward declaration – defined in tinywl-panel.c */
 struct tinywl_panel;
+
+/* Forward declaration – defined in services.c */
+struct tinywl_services;
 
 /* Cursor mode enum */
 typedef enum tinywl_cursor_mode {
@@ -97,6 +110,15 @@ struct tinywl_server {
 
     /* Bottom taskbar panel (Weston-style) */
     struct tinywl_panel           *panel;
+
+    /*
+     * wlr_compositor is stored so services.c can pass it to
+     * wlr_xwayland_create().
+     */
+    struct wlr_compositor         *compositor;
+
+    /* Background services: D-Bus, XWayland, GVFS, Polkit, audio */
+    struct tinywl_services        *services;
 };
 
 struct tinywl_output {

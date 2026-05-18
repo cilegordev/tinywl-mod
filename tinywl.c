@@ -18,6 +18,7 @@
 #include "menu.h"
 #include "background.h"
 #include "panel.h"
+#include "services.h"
 
 /* Forward declarations for minimize/restore (called back by panel.c) */
 void minimize_toplevel(struct tinywl_toplevel *toplevel);
@@ -1005,7 +1006,7 @@ int main(int argc, char *argv[]) {
 	 * to dig your fingers in and play with their behavior if you want. Note that
 	 * the clients cannot set the selection directly without compositor approval,
 	 * see the handling of the request_set_selection event below.*/
-	wlr_compositor_create(server.wl_display, 5, server.renderer);
+	server.compositor = wlr_compositor_create(server.wl_display, 5, server.renderer);
 	wlr_subcompositor_create(server.wl_display);
 	wlr_data_device_manager_create(server.wl_display);
 
@@ -1125,6 +1126,18 @@ int main(int argc, char *argv[]) {
 	setenv("WAYLAND_DISPLAY", socket, true);
 
 	/*
+	 * Start background services: D-Bus session, XWayland, GVFS, Polkit,
+	 * PulseAudio/PipeWire, settings daemon.
+	 * Must be called after setenv("WAYLAND_DISPLAY", …) so that child
+	 * processes inherit the correct socket name.
+	 */
+	server.services = tinywl_services_init(&server);
+	if (!server.services) {
+		wlr_log(WLR_ERROR, "Failed to initialise background services");
+		/* Non-fatal: compositor runs fine without them */
+	}
+
+	/*
 	 * Load and display the desktop wallpaper.  This must be called after
 	 * wlr_backend_start() (so at least one output is available) and after
 	 * setenv("WAYLAND_DISPLAY", …) (so the internal wl_shm client can
@@ -1167,6 +1180,7 @@ int main(int argc, char *argv[]) {
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
 	wl_display_destroy_clients(server.wl_display);
+	tinywl_services_destroy(server.services);
 	tinywl_panel_destroy(server.panel);
 	tinywl_background_destroy(server.background);
 	tinywl_menu_destroy(server.menu);
