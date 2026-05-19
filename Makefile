@@ -43,6 +43,7 @@ tinywl: tinywl.c services.c menu.c background.c panel.c window-state.c tinywl.h 
 clean:
 	rm -f tinywl xdg-shell-protocol.h xdg-shell-protocol.c
 	@echo "done"
+
 install: tinywl
 	cp tinywl /bin/tinywl
 	@echo "tinywl installed to /bin/tinywl"

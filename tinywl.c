@@ -1025,6 +1025,18 @@ int main(int argc, char *argv[]) {
 	/* Initialize window state persistence system */
 	init_window_state_system();
 
+	/* Setup Wayland environment for child processes */
+	if (!getenv("XDG_RUNTIME_DIR")) {
+		char runtime_dir[256];
+		snprintf(runtime_dir, sizeof(runtime_dir), "/run/user/%u", getuid());
+		setenv("XDG_RUNTIME_DIR", runtime_dir, 0);
+	}
+	
+	/* Enable Wayland support for applications */
+	setenv("MOZ_ENABLE_WAYLAND", "1", 0);
+	setenv("QT_QPA_PLATFORM", "wayland", 0);
+	setenv("GDK_BACKEND", "wayland", 0);
+
 	struct tinywl_server server = {0};
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
