@@ -32,18 +32,17 @@ xdg-shell-protocol.h:
 	$(WAYLAND_SCANNER) server-header \
 		$(WAYLAND_PROTOCOLS)/stable/xdg-shell/xdg-shell.xml $@
 
-tinywl: tinywl.c services.c menu.c background.c panel.c tinywl.h services.h xdg-shell-protocol.h
+tinywl: tinywl.c services.c menu.c background.c panel.c window-state.c tinywl.h services.h window-state.h xdg-shell-protocol.h
 	$(CC) $(CFLAGS) \
 		-g -Werror -I. \
 		-DWLR_USE_UNSTABLE \
 		$(XWAYLAND_CFLAGS) \
-		-o $@ tinywl.c services.c menu.c background.c panel.c \
+		-o $@ tinywl.c services.c menu.c background.c panel.c window-state.c \
 		$(LIBS)
 
 clean:
 	rm -f tinywl xdg-shell-protocol.h xdg-shell-protocol.c
 	@echo "done"
-
 install: tinywl
 	cp tinywl /bin/tinywl
 	@echo "tinywl installed to /bin/tinywl"
@@ -53,4 +52,4 @@ uninstall:
 	@echo "tinywl removed from /bin/tinywl"
 
 .DEFAULT_GOAL=tinywl
-.PHONY: clean
+.PHONY: clean install uninstall

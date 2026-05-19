@@ -19,6 +19,7 @@
 #include "background.h"
 #include "panel.h"
 #include "services.h"
+#include "window-state.h"
 
 /* Forward declarations for minimize/restore (called back by panel.c) */
 void minimize_toplevel(struct tinywl_toplevel *toplevel);
@@ -301,6 +302,12 @@ static struct tinywl_toplevel *desktop_toplevel_at(
 
 static void reset_cursor_mode(struct tinywl_server *server) {
 	/* Reset the cursor mode to passthrough. */
+	if (server->grabbed_toplevel && 
+		(server->cursor_mode == TINYWL_CURSOR_MOVE || 
+		 server->cursor_mode == TINYWL_CURSOR_RESIZE)) {
+		/* Save the window state after resize/move is complete */
+		save_window_state(server->grabbed_toplevel);
+	}
 	server->cursor_mode = TINYWL_CURSOR_PASSTHROUGH;
 	server->grabbed_toplevel = NULL;
 }
@@ -483,6 +490,9 @@ static void toggle_maximize(struct tinywl_toplevel *toplevel) {
 			out_box.x, out_box.y);
 		toplevel->maximized = true;
 	}
+	
+	/* Save the updated state */
+	save_window_state(toplevel);
 }
 
 static void server_cursor_button(struct wl_listener *listener, void *data) {
@@ -690,30 +700,71 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
 
-	/* Center the new toplevel on the first available output. */
+	/* Try to load saved window state based on app_id */
+	bool state_loaded = false;
+	if (toplevel->xdg_toplevel->app_id) {
+		state_loaded = load_window_state(toplevel, toplevel->xdg_toplevel->app_id);
+	}
+
 	struct tinywl_server *server = toplevel->server;
-	struct tinywl_output *output;
-	if (!wl_list_empty(&server->outputs)) {
-		output = wl_container_of(server->outputs.next, output, link);
+	
+	if (state_loaded) {
+		if (toplevel->maximized) {
+			/* Window was previously maximized, restore that state */
+			struct tinywl_output *output;
+			if (!wl_list_empty(&server->outputs)) {
+				output = wl_container_of(server->outputs.next, output, link);
+				int out_width = 0, out_height = 0;
+				wlr_output_effective_resolution(output->wlr_output, &out_width, &out_height);
+				
+				struct wlr_box out_box;
+				wlr_output_layout_get_box(server->output_layout,
+					output->wlr_output, &out_box);
+				
+				/* Maximize to output size, accounting for panel height */
+				int panel_height = tinywl_panel_get_height(server->panel);
+				wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
+				wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, out_width, 
+					out_height - panel_height);
+				wlr_scene_node_set_position(&toplevel->scene_tree->node, 
+					out_box.x, out_box.y);
+			}
+		} else {
+			/* Restore saved geometry for non-maximized window */
+			if (toplevel->saved_geometry.width > 0) {
+				wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 
+					toplevel->saved_geometry.width,
+					toplevel->saved_geometry.height);
+			}
+			wlr_scene_node_set_position(&toplevel->scene_tree->node,
+				toplevel->saved_geometry.x,
+				toplevel->saved_geometry.y);
+		}
+	} else {
+		/* Default behavior: center the new toplevel on the first available output */
+		struct tinywl_output *output;
+		if (!wl_list_empty(&server->outputs)) {
+			output = wl_container_of(server->outputs.next, output, link);
 
-		/* Get the output's effective resolution (accounts for transforms/scale). */
-		int out_width = 0, out_height = 0;
-		wlr_output_effective_resolution(output->wlr_output, &out_width, &out_height);
+			/* Get the output's effective resolution (accounts for transforms/scale). */
+			int out_width = 0, out_height = 0;
+			wlr_output_effective_resolution(output->wlr_output, &out_width, &out_height);
 
-		/* Get the output's position in the layout. */
-		struct wlr_box out_box;
-		wlr_output_layout_get_box(server->output_layout,
-			output->wlr_output, &out_box);
+			/* Get the output's position in the layout. */
+			struct wlr_box out_box;
+			wlr_output_layout_get_box(server->output_layout,
+				output->wlr_output, &out_box);
 
-		/* Get the surface geometry (the actual rendered area). */
-		struct wlr_box geo_box;
-		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
+			/* Get the surface geometry (the actual rendered area). */
+			struct wlr_box geo_box;
+			wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
 
-		/* Compute centered position, correcting for the geometry offset. */
-		int x = out_box.x + (out_width  - geo_box.width)  / 2 - geo_box.x;
-		int y = out_box.y + (out_height - geo_box.height) / 2 - geo_box.y;
+			/* Compute centered position, correcting for the geometry offset. */
+			int x = out_box.x + (out_width  - geo_box.width)  / 2 - geo_box.x;
+			int y = out_box.y + (out_height - geo_box.height) / 2 - geo_box.y;
 
-		wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+			wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+		}
 	}
 
 	/* Register this window in the taskbar */
@@ -738,6 +789,9 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	/* Called when the xdg_toplevel is destroyed. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
+
+	/* Save the final state before destroying */
+	save_window_state(toplevel);
 
 	wl_list_remove(&toplevel->map.link);
 	wl_list_remove(&toplevel->unmap.link);
@@ -841,6 +895,9 @@ void minimize_toplevel(struct tinywl_toplevel *toplevel) {
 		wlr_seat_keyboard_notify_clear_focus(server->seat);
 		tinywl_panel_on_focus(server->panel, NULL);
 	}
+	
+	/* Save the minimized state */
+	save_window_state(toplevel);
 }
 
 void restore_toplevel(struct tinywl_toplevel *toplevel) {
@@ -858,6 +915,9 @@ void restore_toplevel(struct tinywl_toplevel *toplevel) {
 	wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
 	tinywl_panel_raise_to_top(toplevel->server->panel);
 	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
+	
+	/* Save the restored state */
+	save_window_state(toplevel);
 }
 
 static void xdg_toplevel_request_maximize(
@@ -961,6 +1021,9 @@ int main(int argc, char *argv[]) {
 		printf("Usage: %s [-s startup command]\n", argv[0]);
 		return 0;
 	}
+
+	/* Initialize window state persistence system */
+	init_window_state_system();
 
 	struct tinywl_server server = {0};
 	/* The Wayland display is managed by libwayland. It handles accepting
