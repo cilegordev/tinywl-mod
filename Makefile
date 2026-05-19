@@ -42,6 +42,15 @@ tinywl: tinywl.c services.c menu.c background.c panel.c tinywl.h services.h xdg-
 
 clean:
 	rm -f tinywl xdg-shell-protocol.h xdg-shell-protocol.c
+	@echo "done"
+
+install: tinywl
+	cp tinywl /bin/tinywl
+	@echo "tinywl installed to /bin/tinywl"
+
+uninstall:
+	rm -f /bin/tinywl
+	@echo "tinywl removed from /bin/tinywl"
 
 .DEFAULT_GOAL=tinywl
 .PHONY: clean
