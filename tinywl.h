@@ -33,6 +33,7 @@
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/util/log.h>
 #include <wlr/util/box.h>
 
@@ -101,6 +102,8 @@ struct tinywl_server {
     struct wlr_output_layout      *output_layout;
     struct wl_list                 outputs;
     struct wl_listener             new_output;
+
+    struct wlr_screencopy_manager_v1 *screencopy_mgr;
 
     /* Right-click popup menu (analogous to twm Button1=root=f.menu, uses BTN_RIGHT) */
     struct tinywl_menu            *menu;

@@ -1085,6 +1085,13 @@ int main(int argc, char *argv[]) {
 	wlr_subcompositor_create(server.wl_display);
 	wlr_data_device_manager_create(server.wl_display);
 
+	/* Create screencopy manager for screenshot/screen recording support */
+	server.screencopy_mgr = wlr_screencopy_manager_v1_create(server.wl_display);
+	if (server.screencopy_mgr == NULL) {
+		wlr_log(WLR_ERROR, "Failed to create screencopy manager");
+		return 1;
+	}
+
 	/* Creates an output layout, which a wlroots utility for working with an
 	 * arrangement of screens in a physical layout. */
 	server.output_layout = wlr_output_layout_create();
