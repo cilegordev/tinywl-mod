@@ -117,6 +117,20 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 	return true;
 }
 
+static void handle_print_key(void) {
+	/*
+	 * Handle Print key to launch xfce4-screenshooter.
+	 * Fork and exec to avoid blocking the compositor.
+	 */
+	if (fork() == 0) {
+		/* Child process: exec xfce4-screenshooter */
+		execl("/usr/libexec/xfce4/screenshooter/scripts/xfce4-screenshooter", NULL);
+		/* If exec fails, exit quietly */
+		exit(1);
+	}
+	/* Parent continues without waiting */
+}
+
 static void keyboard_handle_key(
 		struct wl_listener *listener, void *data) {
 	/* This event is raised when a key is pressed or released. */
@@ -135,7 +149,19 @@ static void keyboard_handle_key(
 
 	bool handled = false;
 	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
-	if (modifiers & WLR_MODIFIER_ALT) {
+	
+	/* Check for Print key (screenshot) - no modifiers needed */
+	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		for (int i = 0; i < nsyms; i++) {
+			if (syms[i] == XKB_KEY_Print) {
+				handle_print_key();
+				handled = true;
+				break;
+			}
+		}
+	}
+	
+	if (!handled && (modifiers & WLR_MODIFIER_ALT)) {
 		/* If alt is held down, check all states (press, repeat, release).
 		 * We suppress forwarding for any key that is a compositor keybinding
 		 * regardless of state — this prevents Tab spam reaching the client. */
@@ -273,23 +299,23 @@ static void seat_request_set_selection(struct wl_listener *listener, void *data)
 }
 
 static void seat_request_start_drag(struct wl_listener *listener, void *data) {
-	/* This event is raised when a client initiates a drag and drop operation.
-	 * We handle the drag and drop properly by passing the request to wlroots,
-	 * which manages the actual drag feedback and drop delivery. */
-	struct tinywl_server *server = wl_container_of(
-			listener, server, request_start_drag);
-	struct wlr_seat_request_start_drag_event *event = data;
-	
-	/* Validate the drag source – the seat must have pointer focus on the
-	 * surface trying to start the drag. This prevents rogue clients from
-	 * spoofing drags. */
-	struct wlr_seat *seat = server->seat;
-	if (wlr_seat_validate_pointer_grab_serial(seat, event->origin, event->serial)) {
-		/* The serial is valid; allow the drag to proceed.
-		 * wlroots handles cursor feedback, highlight rendering, and drop delivery. */
-		wlr_seat_start_pointer_drag(seat, event->drag, event->serial);
-	}
-	/* If serial is invalid, silently drop the drag request (no harm). */
+       /* This event is raised when a client initiates a drag and drop operation.
+        * We handle the drag and drop properly by passing the request to wlroots,
+        * which manages the actual drag feedback and drop delivery. */
+       struct tinywl_server *server = wl_container_of(
+                       listener, server, request_start_drag);
+       struct wlr_seat_request_start_drag_event *event = data;
+       
+       /* Validate the drag source – the seat must have pointer focus on the
+        * surface trying to start the drag. This prevents rogue clients from
+        * spoofing drags. */
+       struct wlr_seat *seat = server->seat;
+       if (wlr_seat_validate_pointer_grab_serial(seat, event->origin, event->serial)) {
+               /* The serial is valid; allow the drag to proceed.
+                * wlroots handles cursor feedback, highlight rendering, and drop delivery. */
+               wlr_seat_start_pointer_drag(seat, event->drag, event->serial);
+       }
+       /* If serial is invalid, silently drop the drag request (no harm). */
 }
 
 static struct tinywl_toplevel *desktop_toplevel_at(
@@ -1193,10 +1219,9 @@ int main(int argc, char *argv[]) {
 	server.request_set_selection.notify = seat_request_set_selection;
 	wl_signal_add(&server.seat->events.request_set_selection,
 			&server.request_set_selection);
-	server.request_start_drag.notify = seat_request_start_drag;
-	wl_signal_add(&server.seat->events.request_start_drag,
-			&server.request_start_drag);
-
+        server.request_start_drag.notify = seat_request_start_drag;
+        wl_signal_add(&server.seat->events.request_start_drag,
+                        &server.request_start_drag);
 	/*
 	 * Initialize right-click popup menu.
 	 * This menu replicates the system.twmrc "defops" menu from TWM,

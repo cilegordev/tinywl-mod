@@ -39,18 +39,19 @@ tinywl: tinywl.c services.c menu.c background.c panel.c window-state.c tinywl.h 
 		$(XWAYLAND_CFLAGS) \
 		-o $@ tinywl.c services.c menu.c background.c panel.c window-state.c \
 		$(LIBS)
+	@echo "Enjoy...!"
 
 clean:
 	rm -f tinywl xdg-shell-protocol.h xdg-shell-protocol.c
-	@echo "done"
+	@echo "Done!"
 
 install: tinywl
 	cp tinywl /bin/tinywl
-	@echo "tinywl installed to /bin/tinywl"
+	@echo "tinywl-mod installed to /bin/tinywl"
 
 uninstall:
 	rm -f /bin/tinywl
-	@echo "tinywl removed from /bin/tinywl"
+	@echo "tinywl-mod removed from /bin/tinywl"
 
 .DEFAULT_GOAL=tinywl
 .PHONY: clean install uninstall

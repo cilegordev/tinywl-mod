@@ -100,8 +100,6 @@ static bool program_exists(const char *prog) {
     char buf[256];
     const char *dirs[] = {
         "/usr/bin", "/usr/local/bin", "/bin",
-        "/usr/lib/polkit-gnome", "/usr/lib/policykit-1-gnome",
-        "/usr/lib/x86_64-linux-gnu/polkit-gnome",
         NULL
     };
     for (int i = 0; dirs[i]; i++) {
@@ -120,14 +118,6 @@ static char *find_polkit_agent(void) {
     /* Preferred agents in order */
     const char *agents[] = {
         "/usr/libexec/xfce4-polkit-authentication-agent-1",
-        "/usr/lib/xfce4/polkit-agent/polkit-xfce-authentication-agent-1",
-        "/usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1",
-        "/usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1",
-        "/usr/lib/x86_64-linux-gnu/polkit-gnome/polkit-gnome-authentication-agent-1",
-        "/usr/lib/polkit-kde-agent-1/polkit-kde-authentication-agent-1",
-        "/usr/lib/mate-polkit/polkit-mate-authentication-agent-1",
-        "/usr/bin/lxpolkit",
-        "/usr/bin/lxsession",
         NULL
     };
     for (int i = 0; agents[i]; i++) {
@@ -344,106 +334,47 @@ static void start_polkit(struct tinywl_services *svc) {
     free(agent);
 }
 
-/* PulseAudio / PipeWire-pulse  */
-
+/* PulseAudio */
 static void start_audio(struct tinywl_services *svc) {
     /*
-     * Prefer PipeWire's PulseAudio compatibility layer if available.
-     * Fall back to PulseAudio daemon.  Don't start either if the socket
-     * already exists (another instance is running).
+     * Start PulseAudio daemon if not already running.
+     * Don't start if the socket already exists (another instance is running).
      */
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     if (!runtime)
         runtime = "/run/user/1000"; /* reasonable fallback */
-
-    /* Check for existing PulseAudio/PipeWire socket */
+    
+    /* Check for existing PulseAudio socket */
     char pa_socket[512];
     snprintf(pa_socket, sizeof(pa_socket), "%s/pulse/native", runtime);
     if (access(pa_socket, F_OK) == 0) {
         wlr_log(WLR_INFO, "services: PulseAudio socket already exists, not starting audio daemon");
         return;
     }
-
-    /* Try pipewire-pulse first */
-    if (program_exists("pipewire")) {
-        char *argv_pw[] = { "pipewire", NULL };
-        pid_t pid = spawn_service("pipewire", argv_pw);
-        if (pid > 0)
-            record_pid(svc, pid, "pipewire");
-
-        struct timespec ts = { .tv_sec = 0, .tv_nsec = 300 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
-
-        if (program_exists("pipewire-pulse")) {
-            char *argv_pp[] = { "pipewire-pulse", NULL };
-            pid_t ppid = spawn_service("pipewire-pulse", argv_pp);
-            if (ppid > 0)
-                record_pid(svc, ppid, "pipewire-pulse");
-        }
-
-        if (program_exists("wireplumber")) {
-            char *argv_wp[] = { "wireplumber", NULL };
-            pid_t wpid = spawn_service("wireplumber", argv_wp);
-            if (wpid > 0)
-                record_pid(svc, wpid, "wireplumber");
-        }
-        return;
-    }
-
-    /* Fall back to PulseAudio */
+    
+    /* Start PulseAudio */
     if (program_exists("pulseaudio")) {
         char *argv_pa[] = { "pulseaudio", "--start", "--log-target=syslog", NULL };
         pid_t pid = spawn_service("pulseaudio", argv_pa);
         if (pid > 0)
             record_pid(svc, pid, "pulseaudio");
     } else {
-        wlr_log(WLR_INFO, "services: neither pipewire nor pulseaudio found, skipping audio");
+        wlr_log(WLR_INFO, "services: pulseaudio not found, skipping audio");
     }
 }
 
-/* XFCE settings daemon  (provides theme / DPI / keyboard settings) */
-
+/* XFCE settings daemon (provides theme / DPI / keyboard settings) */
 static void start_settings_daemon(struct tinywl_services *svc) {
     /*
-     * Settings daemons that communicate over D-Bus (not X11 properties) can
-     * start now.  Daemons that require DISPLAY will be started from
-     * handle_xwayland_ready() once XWayland is up.
-     *
-     * For now we launch xfsettingsd without --no-daemon (some older versions
-     * don't support that flag); it daemonises itself which is fine here
-     * because we track the immediate child PID only for the SIGTERM sweep.
+     * Settings daemon that communicates over D-Bus.
+     * xfsettingsd provides theme, DPI, and keyboard settings.
      */
     if (program_exists("xfsettingsd")) {
         char *argv[] = { "xfsettingsd", NULL };
         pid_t pid = spawn_service("xfsettingsd", argv);
         if (pid > 0)
             record_pid(svc, pid, "xfsettingsd");
-        return;
     }
-
-    /* GNOME settings daemon */
-    if (program_exists("gnome-settings-daemon")) {
-        char *argv[] = { "gnome-settings-daemon", NULL };
-        pid_t pid = spawn_service("gnome-settings-daemon", argv);
-        if (pid > 0)
-            record_pid(svc, pid, "gnome-settings-daemon");
-    }
-}
-
-/* AT-SPI accessibility bus  (required by GTK3+) */
-
-static void start_at_spi(struct tinywl_services *svc) {
-    if (!program_exists("at-spi-bus-launcher"))
-        return;
-
-    /* Don't start if already registered */
-    if (getenv("AT_SPI_BUS_ADDRESS"))
-        return;
-
-    char *argv[] = { "at-spi-bus-launcher", "--launch-immediately", NULL };
-    pid_t pid = spawn_service("at-spi-bus-launcher", argv);
-    if (pid > 0)
-        record_pid(svc, pid, "at-spi-bus-launcher");
 }
 
 /* dconf service (GSettings backend) */
@@ -486,28 +417,23 @@ struct tinywl_services *tinywl_services_init(struct tinywl_server *server) {
     start_dconf(svc);
 
     /*
-     * 4. AT-SPI bus — GTK3 apps log a warning if this is missing
-     */
-    start_at_spi(svc);
-
-    /*
-     * 5. XFCE / GNOME settings daemon
+     * 4. XFCE / GNOME settings daemon
      *    (must be after D-Bus, may need DISPLAY — which XWayland will set)
      */
     start_settings_daemon(svc);
 
     /*
-     * 6. GVFS — virtual filesystem, needed for external drives / Trash
+     * 5. GVFS — virtual filesystem, needed for external drives / Trash
      */
     start_gvfs(svc);
 
     /*
-     * 7. Polkit authentication agent
+     * 6. Polkit authentication agent
      */
     start_polkit(svc);
 
     /*
-     * 8. Audio daemon (PipeWire or PulseAudio)
+     * 7. Audio daemon (PipeWire or PulseAudio)
      */
     start_audio(svc);
 

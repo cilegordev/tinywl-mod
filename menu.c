@@ -66,11 +66,12 @@ typedef enum { ITEM_TITLE, ITEM_EXEC, ITEM_QUIT } ItemType;
 typedef struct { ItemType type; const char *label; const char *cmd; } Item;
 
 static const Item ITEMS[] = {
-    { ITEM_TITLE, "Menu",         NULL             },
-    { ITEM_EXEC,  "Terminal",     "xfce4-terminal" },
-    { ITEM_EXEC,  "File Manager", "thunar"         },
-    { ITEM_EXEC,  "Browser",      "firefox-esr"    },
-    { ITEM_QUIT,  "Exit",         NULL             },
+    { ITEM_TITLE, "Menu",         NULL              },
+    { ITEM_EXEC,  "Terminal",     "xfce4-terminal"  },
+    { ITEM_EXEC,  "File Manager", "thunar"          },
+    { ITEM_EXEC,  "Browser",      "firefox-esr"     },
+    { ITEM_EXEC,  "Find",         "xfce4-appfinder" },
+    { ITEM_QUIT,  "Exit",         NULL              },
 };
 #define N_ITEMS ((int)(sizeof(ITEMS)/sizeof(ITEMS[0])))
 
@@ -312,13 +313,13 @@ static bool text_buf_create(struct tinywl_menu *m) {
 
 /* Clean up internal client */
 static void client_cleanup(struct tinywl_menu *m) {
-    if (m->wl_buf)          { wl_buffer_destroy(m->wl_buf);           m->wl_buf=NULL; }
-    if (m->shm_ctx.shm)     { wl_shm_destroy(m->shm_ctx.shm);         m->shm_ctx.shm=NULL; }
-    if (m->shm_ctx.registry){ wl_registry_destroy(m->shm_ctx.registry);m->shm_ctx.registry=NULL; }
-    if (m->shm_ctx.display) { wl_display_disconnect(m->shm_ctx.display);m->shm_ctx.display=NULL; }
-    if (m->wl_client)       { wl_client_destroy(m->wl_client);         m->wl_client=NULL; }
-    if (m->memdata)         { munmap(m->memdata, m->memsize);           m->memdata=NULL; }
-    if (m->memfd >= 0)      { close(m->memfd);                         m->memfd=-1; }
+    if (m->wl_buf)          { wl_buffer_destroy(m->wl_buf);			m->wl_buf=NULL; }
+    if (m->shm_ctx.shm)     { wl_shm_destroy(m->shm_ctx.shm);			m->shm_ctx.shm=NULL; }
+    if (m->shm_ctx.registry){ wl_registry_destroy(m->shm_ctx.registry);		m->shm_ctx.registry=NULL; }
+    if (m->shm_ctx.display) { wl_display_disconnect(m->shm_ctx.display);	m->shm_ctx.display=NULL; }
+    if (m->wl_client)       { wl_client_destroy(m->wl_client);			m->wl_client=NULL; }
+    if (m->memdata)         { munmap(m->memdata, m->memsize);			m->memdata=NULL; }
+    if (m->memfd >= 0)      { close(m->memfd);					m->memfd=-1; }
 }
 
 /* Scene nodes */
