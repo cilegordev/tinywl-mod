@@ -272,6 +272,26 @@ static void seat_request_set_selection(struct wl_listener *listener, void *data)
 	wlr_seat_set_selection(server->seat, event->source, event->serial);
 }
 
+static void seat_request_start_drag(struct wl_listener *listener, void *data) {
+	/* This event is raised when a client initiates a drag and drop operation.
+	 * We handle the drag and drop properly by passing the request to wlroots,
+	 * which manages the actual drag feedback and drop delivery. */
+	struct tinywl_server *server = wl_container_of(
+			listener, server, request_start_drag);
+	struct wlr_seat_request_start_drag_event *event = data;
+	
+	/* Validate the drag source – the seat must have pointer focus on the
+	 * surface trying to start the drag. This prevents rogue clients from
+	 * spoofing drags. */
+	struct wlr_seat *seat = server->seat;
+	if (wlr_seat_validate_pointer_grab_serial(seat, event->origin, event->serial)) {
+		/* The serial is valid; allow the drag to proceed.
+		 * wlroots handles cursor feedback, highlight rendering, and drop delivery. */
+		wlr_seat_start_pointer_drag(seat, event->drag, event->serial);
+	}
+	/* If serial is invalid, silently drop the drag request (no harm). */
+}
+
 static struct tinywl_toplevel *desktop_toplevel_at(
 		struct tinywl_server *server, double lx, double ly,
 		struct wlr_surface **surface, double *sx, double *sy) {
@@ -1173,6 +1193,9 @@ int main(int argc, char *argv[]) {
 	server.request_set_selection.notify = seat_request_set_selection;
 	wl_signal_add(&server.seat->events.request_set_selection,
 			&server.request_set_selection);
+	server.request_start_drag.notify = seat_request_start_drag;
+	wl_signal_add(&server.seat->events.request_start_drag,
+			&server.request_start_drag);
 
 	/*
 	 * Initialize right-click popup menu.
