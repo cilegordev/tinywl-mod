@@ -25,6 +25,124 @@
 void minimize_toplevel(struct tinywl_toplevel *toplevel);
 void restore_toplevel(struct tinywl_toplevel *toplevel);
 
+struct tinywl_popup {
+	struct wl_list link;
+	struct wlr_xdg_surface *xdg_surface;
+	struct wlr_scene_tree *scene_tree;
+	struct tinywl_server *server;
+	int last_geom_x, last_geom_y;
+	struct wl_listener map;
+	struct wl_listener commit;
+	struct wl_listener destroy;
+};
+
+static void popup_handle_map(struct wl_listener *listener, void *data);
+
+static void popup_handle_destroy(struct wl_listener *listener, void *data) {
+	struct tinywl_popup *popup = wl_container_of(listener, popup, destroy);
+	wl_list_remove(&popup->map.link);
+	wl_list_remove(&popup->commit.link);
+	wl_list_remove(&popup->destroy.link);
+	wl_list_remove(&popup->link);
+	free(popup);
+}
+
+static void apply_popup_constraint(struct tinywl_popup *popup) {
+	struct wlr_xdg_surface *xdg_surface = popup->xdg_surface;
+	struct wlr_xdg_popup *xdg_popup = xdg_surface->popup;
+	struct tinywl_server *server = popup->server;
+	
+	/* Get parent surface */
+	struct wlr_xdg_surface *parent_surface = 
+		wlr_xdg_surface_try_from_wlr_surface(xdg_popup->parent);
+	if (!parent_surface || !parent_surface->data) {
+		return;
+	}
+	struct wlr_scene_tree *parent_tree = parent_surface->data;
+	struct wlr_scene_tree *popup_tree = popup->scene_tree;
+	
+	/* Get output layout */
+	struct wlr_output_layout *layout = server->output_layout;
+	struct wlr_box usable_area;
+	wlr_output_layout_get_box(layout, NULL, &usable_area);
+	
+	int popup_width = xdg_popup->current.geometry.width;
+	int popup_height = xdg_popup->current.geometry.height;
+	int popup_x = xdg_popup->current.geometry.x;
+	int popup_y = xdg_popup->current.geometry.y;
+	
+	/* Calculate absolute position by walking up scene tree hierarchy */
+	int abs_x = popup_x;
+	int abs_y = popup_y;
+	struct wlr_scene_tree *current = parent_tree;
+	
+	while (current) {
+		abs_x += current->node.x;
+		abs_y += current->node.y;
+		if (!current->node.parent) break;
+		current = (struct wlr_scene_tree *)current->node.parent;
+	}
+	
+	int final_x = popup_x;
+	int final_y = popup_y;
+	
+	/* RIGHT boundary */
+	if (abs_x + popup_width > usable_area.x + usable_area.width) {
+		int max_x = (usable_area.x + usable_area.width) - popup_width - 10;
+		final_x = max_x - parent_tree->node.x;
+	}
+	
+	/* LEFT boundary */
+	if (abs_x < usable_area.x) {
+		int min_x = usable_area.x + 10;
+		final_x = min_x - parent_tree->node.x;
+	}
+	
+	/* BOTTOM boundary */
+	if (abs_y + popup_height > usable_area.y + usable_area.height) {
+		int max_y = (usable_area.y + usable_area.height) - popup_height - 10;
+		final_y = max_y - parent_tree->node.y;
+	}
+	
+	/* TOP boundary */
+	if (abs_y < usable_area.y) {
+		int min_y = usable_area.y + 10;
+		final_y = min_y - parent_tree->node.y;
+	}
+	
+	if (final_x != popup_x || final_y != popup_y) {
+		/* Update XDG geometry - this is what scene graph uses for rendering */
+		xdg_popup->current.geometry.x = final_x;
+		xdg_popup->current.geometry.y = final_y;
+		
+		/* Also update scene node to match */
+		wlr_scene_node_set_position(&popup_tree->node, final_x, final_y);
+		
+		/* Track last constrained position */
+		popup->last_geom_x = final_x;
+		popup->last_geom_y = final_y;
+	} else {
+		/* No constraint needed, but track current geometry */
+		popup->last_geom_x = popup_x;
+		popup->last_geom_y = popup_y;
+	}
+}
+
+static void popup_handle_reposition(struct wl_listener *listener, void *data) {
+	struct tinywl_popup *popup = wl_container_of(listener, popup, commit);
+	struct wlr_xdg_popup *xdg_popup = popup->xdg_surface->popup;
+	
+	/* Check if geometry changed since last constraint */
+	if (xdg_popup->current.geometry.x != popup->last_geom_x ||
+	    xdg_popup->current.geometry.y != popup->last_geom_y) {
+		apply_popup_constraint(popup);
+	}
+}
+
+static void popup_handle_map(struct wl_listener *listener, void *data) {
+	struct tinywl_popup *popup = wl_container_of(listener, popup, map);
+	apply_popup_constraint(popup);
+}
 
 static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
@@ -1008,8 +1126,26 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 			wlr_xdg_surface_try_from_wlr_surface(xdg_surface->popup->parent);
 		assert(parent != NULL);
 		struct wlr_scene_tree *parent_tree = parent->data;
-		xdg_surface->data = wlr_scene_xdg_surface_create(
+		struct wlr_scene_tree *popup_tree = wlr_scene_xdg_surface_create(
 			parent_tree, xdg_surface);
+		xdg_surface->data = popup_tree;
+		
+		/* Create popup tracker to apply constraints when mapped */
+		struct tinywl_popup *popup = calloc(1, sizeof(*popup));
+		if (popup) {
+			popup->xdg_surface = xdg_surface;
+			popup->scene_tree = popup_tree;
+			popup->server = server;
+			popup->last_geom_x = 0;
+			popup->last_geom_y = 0;
+			popup->map.notify = popup_handle_map;
+			popup->commit.notify = popup_handle_reposition;
+			popup->destroy.notify = popup_handle_destroy;
+			wl_signal_add(&xdg_surface->surface->events.map, &popup->map);
+			wl_signal_add(&xdg_surface->surface->events.commit, &popup->commit);
+			wl_signal_add(&xdg_surface->events.destroy, &popup->destroy);
+			wl_list_insert(&server->popups, &popup->link);
+		}
 		return;
 	}
 	assert(xdg_surface->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL);
@@ -1162,6 +1298,7 @@ int main(int argc, char *argv[]) {
 	 * https://drewdevault.com/2018/07/29/Wayland-shells.html.
 	 */
 	wl_list_init(&server.toplevels);
+	wl_list_init(&server.popups);
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
 	server.new_xdg_surface.notify = server_new_xdg_surface;
 	wl_signal_add(&server.xdg_shell->events.new_surface,
