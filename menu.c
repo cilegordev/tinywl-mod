@@ -261,7 +261,6 @@ static bool text_buf_create(struct tinywl_menu *m) {
         wlr_log(WLR_ERROR, "menu: wl_shm not found after 50 iterations");
         return false;
     }
-    wlr_log(WLR_DEBUG, "menu: wl_shm OK");
 
     /* 6. Create wl_shm_pool + wl_buffer */
     struct wl_shm_pool *pool = wl_shm_create_pool(
@@ -307,7 +306,6 @@ static bool text_buf_create(struct tinywl_menu *m) {
     }
 
     wlr_scene_node_set_position(&m->text_buf->node, 0, 0);
-    wlr_log(WLR_INFO, "menu: text overlay %dx%d OK", m->total_w, m->total_h);
     return true;
 }
 
@@ -360,8 +358,6 @@ static void nodes_create(struct tinywl_menu *m) {
             wlr_scene_node_set_position(&m->rows[i]->node, BORDER, row_y(i));
     }
 
-    wlr_log(WLR_DEBUG, "menu: nodes created %dx%d", m->total_w, m->total_h);
-
     /* Add text overlay (optional — if it fails, rects still display) */
     if (!text_buf_create(m))
         wlr_log(WLR_ERROR, "menu: text overlay failed, displaying without text");
@@ -408,10 +404,8 @@ static void menu_activate(struct tinywl_menu *m, int idx) {
     switch (ITEMS[idx].type) {
     case ITEM_TITLE: break;
     case ITEM_EXEC:
-        wlr_log(WLR_INFO,"menu: exec '%s'",ITEMS[idx].cmd);
         do_exec(ITEMS[idx].cmd); break;
     case ITEM_QUIT:
-        wlr_log(WLR_INFO,"menu: Exit");
         wl_display_terminate(m->server->wl_display); break;
     }
 }
@@ -454,7 +448,6 @@ struct tinywl_menu *tinywl_menu_init(struct tinywl_server *server) {
     m->server=server; m->visible=false; m->hovered=-1; m->memfd=-1;
     m->btn.notify=on_btn; wl_signal_add(&server->cursor->events.button,&m->btn);
     m->mot.notify=on_mot; wl_signal_add(&server->cursor->events.motion,&m->mot);
-    wlr_log(WLR_INFO,"menu: init OK");
     return m;
 }
 
@@ -479,10 +472,6 @@ void tinywl_menu_show(struct tinywl_menu *menu, int x, int y, uint32_t time_msec
     wlr_scene_node_set_position(&menu->tree->node,menu->mx,menu->my);
     wlr_scene_node_set_enabled(&menu->tree->node, true);
     menu->visible=true;
-
-    wlr_log(WLR_INFO,"menu: show (%d,%d) %dx%d text=%s",
-            menu->mx,menu->my,menu->total_w,menu->total_h,
-            menu->text_buf?"OK":"none");
 }
 
 void tinywl_menu_hide(struct tinywl_menu *menu)

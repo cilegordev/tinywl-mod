@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/vt.h>
 #include <linux/input-event-codes.h>
 #include <xkbcommon/xkbcommon.h>
 
@@ -208,6 +212,41 @@ static void keyboard_handle_modifiers(
 		&keyboard->wlr_keyboard->modifiers);
 }
 
+static void handle_vt_switch(struct tinywl_server *server, int vt_number) {
+	/*
+	 * Switch to a specific virtual terminal (TTY) using ioctl.
+	 * VT numbers are 1-8, maps to F1-F8 keys.
+	 */
+	int fd = -1;
+	
+	/* Method 1: Try /dev/tty0 (the virtual console multiplexer) */
+	fd = open("/dev/tty0", O_RDWR);
+	if (fd >= 0) {
+		ioctl(fd, VT_ACTIVATE, vt_number);
+		ioctl(fd, VT_WAITACTIVE, vt_number);
+		close(fd);
+		return;
+	}
+	
+	/* Method 2: Try current controlling terminal */
+	fd = open("/dev/console", O_RDWR);
+	if (fd >= 0) {
+		ioctl(fd, VT_ACTIVATE, vt_number);
+		ioctl(fd, VT_WAITACTIVE, vt_number);
+		close(fd);
+		return;
+	}
+	
+	/* Method 3: Try stdin/stdout/stderr if they are connected to a TTY */
+	for (int std_fd = STDIN_FILENO; std_fd <= STDERR_FILENO; std_fd++) {
+		if (isatty(std_fd)) {
+			ioctl(std_fd, VT_ACTIVATE, vt_number);
+			ioctl(std_fd, VT_WAITACTIVE, vt_number);
+			return;
+		}
+	}
+}
+
 static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 	/*
 	 * Here we handle compositor keybindings. This is when the compositor is
@@ -275,6 +314,39 @@ static void keyboard_handle_key(
 				handle_print_key();
 				handled = true;
 				break;
+			}
+		}
+	}
+	
+	/* Check for XF86Switch_VT keysyms (sent by keyboard driver for ALT+CTRL+F1-F8) */
+	if (!handled && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		for (int i = 0; i < nsyms; i++) {
+			xkb_keysym_t sym = syms[i];
+			/* XF86Switch_VT_1 = 0x1008fe01, XF86Switch_VT_8 = 0x1008fe08 */
+			if (sym >= 0x1008fe01 && sym <= 0x1008fe08) {
+				int vt_number = sym - 0x1008fe00;  /* Extract VT number from keysym */
+				handle_vt_switch(server, vt_number);
+				handled = true;
+				break;
+			}
+		}
+	}
+	
+	/* Check for ALT+CTRL+F1-F8 to switch TTY (as fallback for other keyboards) */
+	if (!handled && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		uint32_t alt = modifiers & WLR_MODIFIER_ALT;
+		uint32_t ctrl = modifiers & WLR_MODIFIER_CTRL;
+		
+		if (alt && ctrl) {
+			for (int i = 0; i < nsyms; i++) {
+				xkb_keysym_t sym = syms[i];
+				/* F1 to F8 maps to TTY 1 to 8 */
+				if (sym >= XKB_KEY_F1 && sym <= XKB_KEY_F8) {
+					int vt_number = sym - XKB_KEY_F1 + 1;
+					handle_vt_switch(server, vt_number);
+					handled = true;
+					break;
+				}
 			}
 		}
 	}

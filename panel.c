@@ -655,8 +655,6 @@ struct tinywl_panel *tinywl_panel_create(struct tinywl_server *server)
     p->cursor_motion.notify = on_cursor_motion;
     wl_signal_add(&server->cursor->events.motion, &p->cursor_motion);
 
-    wlr_log(WLR_INFO, "panel: taskbar created %dx%d at y=%d",
-            p->out_w, PANEL_HEIGHT, p->panel_y);
     return p;
 }
 
@@ -678,7 +676,6 @@ void tinywl_panel_on_map(struct tinywl_panel *p, struct tinywl_toplevel *topleve
     p->n_tasks++;
     panel_layout(p);
     panel_redraw(p);
-    wlr_log(WLR_DEBUG, "panel: task added '%s' (%d total)", task_label(t), p->n_tasks);
 }
 
 void tinywl_panel_on_unmap(struct tinywl_panel *p, struct tinywl_toplevel *toplevel)
@@ -711,7 +708,6 @@ void tinywl_panel_on_unmap(struct tinywl_panel *p, struct tinywl_toplevel *tople
 
     panel_layout(p);
     panel_redraw(p);
-    wlr_log(WLR_DEBUG, "panel: task removed (%d remaining)", p->n_tasks);
 }
 
 void tinywl_panel_on_focus(struct tinywl_panel *p, struct tinywl_toplevel *toplevel)
