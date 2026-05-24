@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <errno.h>
@@ -944,6 +945,63 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
 	struct tinywl_server *server = toplevel->server;
 	
+	/* Check if this is a dialog/modal window (has parent) */
+	bool is_dialog = (toplevel->xdg_toplevel->parent != NULL);
+	
+	/* Additional dialog detection: common dialog/modal window titles/names */
+	if (!is_dialog && toplevel->xdg_toplevel->title) {
+		const char *title = toplevel->xdg_toplevel->title;
+		/* Common dialog patterns */
+		if (strstr(title, "Confirm") || strstr(title, "Warning")  ||
+		    strstr(title, "Error")   || strstr(title, "Question") ||
+		    strstr(title, "replace") || strstr(title, "Replace")  ||
+		    strstr(title, "Create")  || strstr(title, "Rename")   ||
+		    strstr(title, "Delete")  || strstr(title, "Move")     ||
+		    strstr(title, "Save")    || strstr(title, "Open"))    {
+			is_dialog = true;
+		}
+	}
+	
+	/* Force dialog windows to NOT be maximized or fullscreen */
+	if (is_dialog) {
+		wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, false);
+		toplevel->maximized = false;
+		/* Center dialog on screen */
+		if (!wl_list_empty(&server->outputs)) {
+			struct tinywl_output *output = wl_container_of(server->outputs.next, output, link);
+			int out_width = 0, out_height = 0;
+			wlr_output_effective_resolution(output->wlr_output, &out_width, &out_height);
+			
+			struct wlr_box out_box;
+			wlr_output_layout_get_box(server->output_layout, output->wlr_output, &out_box);
+			
+			struct wlr_box geo_box;
+			wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
+			
+			int width = geo_box.width;
+			int height = geo_box.height;
+			int panel_height = tinywl_panel_get_height(server->panel);
+			
+			/* Constrain size */
+			int max_width = out_width - 40;
+			int max_height = out_height - panel_height - 40;
+			
+			if (width > max_width) width = max_width;
+			if (height > max_height) height = max_height;
+			
+			if (width != geo_box.width || height != geo_box.height) {
+				wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, width, height);
+			}
+			
+			/* Center position */
+			int x = out_box.x + (out_width - width) / 2;
+			int y = out_box.y + (out_height - height) / 2;
+			wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+		}
+		return; /* Dialog done, don't process further */
+	}
+	
+	/* For normal windows (non-dialog), restore saved state or center */
 	if (state_loaded) {
 		if (toplevel->maximized) {
 			/* Window was previously maximized, restore that state */
@@ -977,27 +1035,46 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 				toplevel->saved_geometry.y);
 		}
 	} else {
-		/* Default behavior: center the new toplevel on the first available output */
+		/* No saved state: center new window on screen */
 		struct tinywl_output *output;
 		if (!wl_list_empty(&server->outputs)) {
 			output = wl_container_of(server->outputs.next, output, link);
 
-			/* Get the output's effective resolution (accounts for transforms/scale). */
+			/* Get the output's effective resolution */
 			int out_width = 0, out_height = 0;
 			wlr_output_effective_resolution(output->wlr_output, &out_width, &out_height);
 
-			/* Get the output's position in the layout. */
+			/* Get the output's position in the layout */
 			struct wlr_box out_box;
 			wlr_output_layout_get_box(server->output_layout,
 				output->wlr_output, &out_box);
 
-			/* Get the surface geometry (the actual rendered area). */
+			/* Get the actual surface size - this is what the client rendered */
 			struct wlr_box geo_box;
 			wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
-
-			/* Compute centered position, correcting for the geometry offset. */
-			int x = out_box.x + (out_width  - geo_box.width)  / 2 - geo_box.x;
-			int y = out_box.y + (out_height - geo_box.height) / 2 - geo_box.y;
+			
+			int width = geo_box.width;
+			int height = geo_box.height;
+			int panel_height = tinywl_panel_get_height(server->panel);
+			
+			/* Constrain size for new windows */
+			int max_width = out_width - 40;
+			int max_height = out_height - panel_height - 40;
+			
+			if (width > max_width) {
+				width = max_width;
+			}
+			if (height > max_height) {
+				height = max_height;
+			}
+			
+			if (width != geo_box.width || height != geo_box.height) {
+				wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, width, height);
+			}
+			
+			/* Center position calculation */
+			int x = out_box.x + (out_width - width) / 2;
+			int y = out_box.y + (out_height - height) / 2;
 
 			wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
 		}
@@ -1158,18 +1235,39 @@ void restore_toplevel(struct tinywl_toplevel *toplevel) {
 
 static void xdg_toplevel_request_maximize(
 		struct wl_listener *listener, void *data) {
-	/* Client requested maximize (e.g. via its own maximize button).
-	 * We honour it by toggling our maximize implementation. */
+	/* Client requested maximize. For dialogs/modals, we ignore this.
+	 * For normal windows, we honor the request. */
 	struct tinywl_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_maximize);
+	
+	/* Check if this is a dialog/modal window (has parent or is modal) */
+	bool is_dialog = (toplevel->xdg_toplevel->parent != NULL);
+	
+	if (is_dialog) {
+		/* This is a transient/modal dialog - REJECT maximize request */
+		return;
+	}
+	
+	/* For normal windows, allow maximize */
 	toggle_maximize(toplevel);
 }
 
 static void xdg_toplevel_request_fullscreen(
 		struct wl_listener *listener, void *data) {
-	/* Just as with request_maximize, we must send a configure here. */
+	/* Dialog/modal windows should not go fullscreen.
+	 * We ignore fullscreen requests for dialog windows by not setting the state. */
 	struct tinywl_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_fullscreen);
+	
+	/* Check if this is a dialog/modal window */
+	if (toplevel->xdg_toplevel->parent != NULL) {
+		/* This is a transient/modal dialog - REJECT fullscreen */
+		/* Don't schedule configure, just ignore the request */
+		return;
+	}
+	
+	/* For normal windows, allow fullscreen but constrain it */
+	/* Still just schedule configure without actually going fullscreen */
 	wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
 }
 
