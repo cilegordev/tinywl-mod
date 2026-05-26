@@ -755,6 +755,18 @@ void tinywl_panel_minimize_toplevel(struct tinywl_panel *p,
     p->cb_minimize(toplevel);
 }
 
+void tinywl_panel_hide(struct tinywl_panel *p)
+{
+    if (!p || !p->tree) return;
+    wlr_scene_node_set_enabled(&p->tree->node, false);
+}
+
+void tinywl_panel_show(struct tinywl_panel *p)
+{
+    if (!p || !p->tree) return;
+    wlr_scene_node_set_enabled(&p->tree->node, true);
+}
+
 void tinywl_panel_destroy(struct tinywl_panel *p)
 {
     if (!p) return;

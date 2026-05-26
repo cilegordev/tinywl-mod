@@ -180,6 +180,14 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface 
 	wl_list_insert(&server->toplevels, &toplevel->link);
 	/* Keep the panel always on top of every window */
 	tinywl_panel_raise_to_top(server->panel);
+	
+	/* Show/hide panel based on fullscreen state of focused window */
+	if (toplevel->fullscreen) {
+		tinywl_panel_hide(server->panel);
+	} else {
+		tinywl_panel_show(server->panel);
+	}
+	
 	/* Activate the new surface */
 	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
 	/* Update the taskbar highlight to reflect the newly focused window */
@@ -732,6 +740,59 @@ static void toggle_maximize(struct tinywl_toplevel *toplevel) {
 	save_window_state(toplevel);
 }
 
+static void toggle_fullscreen(struct tinywl_toplevel *toplevel) {
+	struct tinywl_server *server = toplevel->server;
+
+	if (toplevel->fullscreen) {
+		/* Restore to saved geometry */
+		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, false);
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
+			toplevel->saved_geometry_fullscreen.width,
+			toplevel->saved_geometry_fullscreen.height);
+		wlr_scene_node_set_position(&toplevel->scene_tree->node,
+			toplevel->saved_geometry_fullscreen.x,
+			toplevel->saved_geometry_fullscreen.y);
+		toplevel->fullscreen = false;
+		
+		/* Show panel again */
+		tinywl_panel_show(server->panel);
+	} else {
+		/* Save current geometry before going fullscreen */
+		struct wlr_box geo;
+		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
+		toplevel->saved_geometry_fullscreen.x = toplevel->scene_tree->node.x;
+		toplevel->saved_geometry_fullscreen.y = toplevel->scene_tree->node.y;
+		toplevel->saved_geometry_fullscreen.width  = geo.width;
+		toplevel->saved_geometry_fullscreen.height = geo.height;
+
+		/* Get output dimensions */
+		struct tinywl_output *output = NULL;
+		if (!wl_list_empty(&server->outputs)) {
+			output = wl_container_of(server->outputs.next, output, link);
+		}
+		int out_width = 0, out_height = 0;
+		struct wlr_box out_box = {0};
+		if (output) {
+			wlr_output_effective_resolution(output->wlr_output,
+				&out_width, &out_height);
+			wlr_output_layout_get_box(server->output_layout,
+				output->wlr_output, &out_box);
+		}
+
+		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, true);
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, out_width, out_height);
+		wlr_scene_node_set_position(&toplevel->scene_tree->node,
+			out_box.x, out_box.y);
+		toplevel->fullscreen = true;
+		
+		/* Hide panel during fullscreen */
+		tinywl_panel_hide(server->panel);
+	}
+
+	/* Save the updated state */
+	save_window_state(toplevel);
+}
+
 static void server_cursor_button(struct wl_listener *listener, void *data) {
 	/* This event is forwarded by the cursor when a pointer emits a button
 	 * event. */
@@ -952,12 +1013,12 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	if (!is_dialog && toplevel->xdg_toplevel->title) {
 		const char *title = toplevel->xdg_toplevel->title;
 		/* Common dialog patterns */
-		if (strstr(title, "Confirm") || strstr(title, "Warning")  ||
-		    strstr(title, "Error")   || strstr(title, "Question") ||
-		    strstr(title, "replace") || strstr(title, "Replace")  ||
-		    strstr(title, "Create")  || strstr(title, "Rename")   ||
-		    strstr(title, "Delete")  || strstr(title, "Move")     ||
-		    strstr(title, "Save")    || strstr(title, "Open"))    {
+		if (strstr(title, "Confirm") || strstr(title, "Warning") || 
+		    strstr(title, "Error") || strstr(title, "Question") ||
+		    strstr(title, "replace") || strstr(title, "Replace") ||
+		    strstr(title, "Create") || strstr(title, "Rename") ||
+		    strstr(title, "Delete") || strstr(title, "Move") ||
+		    strstr(title, "Save") || strstr(title, "Open")) {
 			is_dialog = true;
 		}
 	}
@@ -1088,6 +1149,12 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	/* Called when the surface is unmapped, and should no longer be shown. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
+
+	/* If window was in fullscreen, show panel again */
+	if (toplevel->fullscreen) {
+		tinywl_panel_show(toplevel->server->panel);
+		toplevel->fullscreen = false;
+	}
 
 	/* Reset the cursor mode if the grabbed toplevel was unmapped. */
 	if (toplevel == toplevel->server->grabbed_toplevel) {
@@ -1254,21 +1321,18 @@ static void xdg_toplevel_request_maximize(
 
 static void xdg_toplevel_request_fullscreen(
 		struct wl_listener *listener, void *data) {
-	/* Dialog/modal windows should not go fullscreen.
-	 * We ignore fullscreen requests for dialog windows by not setting the state. */
+	/* Client requested fullscreen. Dialog windows should not go fullscreen. */
 	struct tinywl_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_fullscreen);
 	
 	/* Check if this is a dialog/modal window */
 	if (toplevel->xdg_toplevel->parent != NULL) {
 		/* This is a transient/modal dialog - REJECT fullscreen */
-		/* Don't schedule configure, just ignore the request */
 		return;
 	}
 	
-	/* For normal windows, allow fullscreen but constrain it */
-	/* Still just schedule configure without actually going fullscreen */
-	wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+	/* For normal windows, allow fullscreen */
+	toggle_fullscreen(toplevel);
 }
 
 static void xdg_toplevel_request_minimize(

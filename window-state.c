@@ -2,7 +2,7 @@
  * window-state.c – Window state persistence for tinywl
  * 
  * Saves window state to ~/.config/tinywl/windows.state in format:
- * app_id|maximized|x|y|width|height|minimized
+ * app_id|maximized|x|y|width|height|minimized|fullscreen
  */
 
 #define _POSIX_C_SOURCE 200112L
@@ -73,6 +73,7 @@ void save_window_state(struct tinywl_toplevel *toplevel) {
 	int height = geo.height;
 	bool maximized = toplevel->maximized;
 	bool minimized = toplevel->minimized;
+	bool fullscreen = toplevel->fullscreen;
 	
 	const char *state_file = get_state_file_path();
 	
@@ -96,8 +97,8 @@ void save_window_state(struct tinywl_toplevel *toplevel) {
 			if (sscanf(line, "%127[^|]", stored_app_id) == 1) {
 				if (strcmp(stored_app_id, app_id) == 0) {
 					/* Update existing entry */
-					fprintf(temp, "%s|%d|%d|%d|%d|%d|%d\n",
-						app_id, maximized, x, y, width, height, minimized);
+					fprintf(temp, "%s|%d|%d|%d|%d|%d|%d|%d\n",
+						app_id, maximized, x, y, width, height, minimized, fullscreen);
 					found = true;
 				} else {
 					/* Keep other entries */
@@ -110,8 +111,8 @@ void save_window_state(struct tinywl_toplevel *toplevel) {
 	
 	/* Add new entry if not found */
 	if (!found) {
-		fprintf(temp, "%s|%d|%d|%d|%d|%d|%d\n",
-			app_id, maximized, x, y, width, height, minimized);
+		fprintf(temp, "%s|%d|%d|%d|%d|%d|%d|%d\n",
+			app_id, maximized, x, y, width, height, minimized, fullscreen);
 	}
 	
 	fclose(temp);
@@ -136,14 +137,25 @@ bool load_window_state(struct tinywl_toplevel *toplevel, const char *app_id) {
 	
 	while (fgets(line, sizeof(line), f)) {
 		char stored_app_id[128];
-		int maximized, x, y, width, height, minimized;
+		int maximized, x, y, width, height, minimized, fullscreen;
 		
-		if (sscanf(line, "%127[^|]|%d|%d|%d|%d|%d|%d",
-				stored_app_id, &maximized, &x, &y, &width, &height, &minimized) == 7) {
+		/* Try reading 8 fields first (with fullscreen) */
+		int result = sscanf(line, "%127[^|]|%d|%d|%d|%d|%d|%d|%d",
+				stored_app_id, &maximized, &x, &y, &width, &height, &minimized, &fullscreen);
+		
+		/* If that fails, try reading 7 fields (old format without fullscreen) */
+		if (result != 8) {
+			result = sscanf(line, "%127[^|]|%d|%d|%d|%d|%d|%d",
+					stored_app_id, &maximized, &x, &y, &width, &height, &minimized);
+			fullscreen = 0; /* Default to not fullscreen for old files */
+		}
+		
+		if (result >= 7) {
 			if (strcmp(stored_app_id, app_id) == 0) {
 				/* Found matching entry */
 				toplevel->maximized = (bool)maximized;
 				toplevel->minimized = (bool)minimized;
+				toplevel->fullscreen = (bool)fullscreen;
 				
 				/* Save geometry for restore */
 				toplevel->saved_geometry.x = x;

@@ -153,6 +153,10 @@ struct tinywl_toplevel {
     bool            maximized;
     struct wlr_box  saved_geometry; /* x,y,width,height before maximize */
 
+    /* Fullscreen state */
+    bool            fullscreen;
+    struct wlr_box  saved_geometry_fullscreen; /* x,y,width,height before fullscreen */
+
     /* Minimize state: scene node is hidden when minimized == true */
     bool            minimized;
 

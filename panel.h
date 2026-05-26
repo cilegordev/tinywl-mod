@@ -34,6 +34,10 @@ void tinywl_panel_restore_toplevel(struct tinywl_panel *p,
 void tinywl_panel_minimize_toplevel(struct tinywl_panel *p,
                                      struct tinywl_toplevel *toplevel);
 
+void tinywl_panel_hide(struct tinywl_panel *p);
+
+void tinywl_panel_show(struct tinywl_panel *p);
+
 void tinywl_panel_destroy(struct tinywl_panel *p);
 
 #ifdef __cplusplus
