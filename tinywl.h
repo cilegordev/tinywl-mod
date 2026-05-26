@@ -159,6 +159,10 @@ struct tinywl_toplevel {
 
     /* Minimize state: scene node is hidden when minimized == true */
     bool            minimized;
+    
+    /* Dialog/Modal and Progress tracking */
+    bool            is_dialog;
+    bool            is_progress;
 
     /* Double-click detection on headerbar */
     uint32_t        last_button_time_msec;

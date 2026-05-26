@@ -30,6 +30,9 @@
 void minimize_toplevel(struct tinywl_toplevel *toplevel);
 void restore_toplevel(struct tinywl_toplevel *toplevel);
 
+/* Forward declaration for dialog stacking */
+static void raise_dialogs_to_front(struct tinywl_server *server);
+
 struct tinywl_popup {
 	struct wl_list link;
 	struct wlr_xdg_surface *xdg_surface;
@@ -186,6 +189,11 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface 
 		tinywl_panel_hide(server->panel);
 	} else {
 		tinywl_panel_show(server->panel);
+	}
+	
+	/* If dialog is focused, raise all dialogs to ensure they stay on top */
+	if (toplevel->is_dialog) {
+		raise_dialogs_to_front(server);
 	}
 	
 	/* Activate the new surface */
@@ -793,6 +801,19 @@ static void toggle_fullscreen(struct tinywl_toplevel *toplevel) {
 	save_window_state(toplevel);
 }
 
+static void raise_dialogs_to_front(struct tinywl_server *server) {
+	/* Raise all dialog windows to the top of the stack to keep them visible
+	 * above progress windows and other background windows */
+	struct tinywl_toplevel *toplevel;
+	wl_list_for_each(toplevel, &server->toplevels, link) {
+		if (toplevel->is_dialog) {
+			wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
+		}
+	}
+	/* Ensure panel stays on top */
+	tinywl_panel_raise_to_top(server->panel);
+}
+
 static void server_cursor_button(struct wl_listener *listener, void *data) {
 	/* This event is forwarded by the cursor when a pointer emits a button
 	 * event. */
@@ -1007,24 +1028,30 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	struct tinywl_server *server = toplevel->server;
 	
 	/* Check if this is a dialog/modal window (has parent) */
-	bool is_dialog = (toplevel->xdg_toplevel->parent != NULL);
+	toplevel->is_dialog = (toplevel->xdg_toplevel->parent != NULL);
+	toplevel->is_progress = false;
 	
 	/* Additional dialog detection: common dialog/modal window titles/names */
-	if (!is_dialog && toplevel->xdg_toplevel->title) {
+	if (!toplevel->is_dialog && toplevel->xdg_toplevel->title) {
 		const char *title = toplevel->xdg_toplevel->title;
+		/* Detect progress windows and notifications */
+		if (strstr(title, "Progress") || strstr(title, "progress") ||
+		    strstr(title, "Notification") || strstr(title, "notification")) {
+			toplevel->is_progress = true;
+		}
 		/* Common dialog patterns */
-		if (strstr(title, "Confirm") || strstr(title, "Warning") || 
+		else if (strstr(title, "Confirm") || strstr(title, "Warning") || 
 		    strstr(title, "Error") || strstr(title, "Question") ||
 		    strstr(title, "replace") || strstr(title, "Replace") ||
 		    strstr(title, "Create") || strstr(title, "Rename") ||
 		    strstr(title, "Delete") || strstr(title, "Move") ||
 		    strstr(title, "Save") || strstr(title, "Open")) {
-			is_dialog = true;
+			toplevel->is_dialog = true;
 		}
 	}
 	
 	/* Force dialog windows to NOT be maximized or fullscreen */
-	if (is_dialog) {
+	if (toplevel->is_dialog) {
 		wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, false);
 		toplevel->maximized = false;
 		/* Center dialog on screen */
@@ -1060,6 +1087,45 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 			wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
 		}
 		return; /* Dialog done, don't process further */
+	}
+	
+	/* Force progress windows to smaller size and NOT be maximized */
+	if (toplevel->is_progress) {
+		wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, false);
+		toplevel->maximized = false;
+		/* Center progress window on screen */
+		if (!wl_list_empty(&server->outputs)) {
+			struct tinywl_output *output = wl_container_of(server->outputs.next, output, link);
+			int out_width = 0, out_height = 0;
+			wlr_output_effective_resolution(output->wlr_output, &out_width, &out_height);
+			
+			struct wlr_box out_box;
+			wlr_output_layout_get_box(server->output_layout, output->wlr_output, &out_box);
+			
+			struct wlr_box geo_box;
+			wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
+			
+			int width = geo_box.width;
+			int height = geo_box.height;
+			int panel_height = tinywl_panel_get_height(server->panel);
+			
+			/* Constrain size for progress window - much smaller */
+			int max_width = 500;
+			int max_height = 250;
+			
+			if (width > max_width) width = max_width;
+			if (height > max_height) height = max_height;
+			
+			if (width != geo_box.width || height != geo_box.height) {
+				wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, width, height);
+			}
+			
+			/* Center position */
+			int x = out_box.x + (out_width - width) / 2;
+			int y = out_box.y + (out_height - height) / 2;
+			wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+		}
+		return; /* Progress window done, don't process further */
 	}
 	
 	/* For normal windows (non-dialog), restore saved state or center */
@@ -1122,6 +1188,12 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 			int max_width = out_width - 40;
 			int max_height = out_height - panel_height - 40;
 			
+			/* For progress windows, use smaller constraint */
+			if (toplevel->is_progress) {
+				max_width = 500;   /* Max 500px width for progress */
+				max_height = 250;  /* Max 250px height for progress */
+			}
+			
 			if (width > max_width) {
 				width = max_width;
 			}
@@ -1144,6 +1216,11 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	/* Register this window in the taskbar */
 	tinywl_panel_on_map(server->panel, toplevel);
 	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
+	
+	/* If this is a dialog, ensure it stays on top of progress windows */
+	if (toplevel->is_dialog) {
+		raise_dialogs_to_front(server);
+	}
 }
 
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
@@ -1307,10 +1384,8 @@ static void xdg_toplevel_request_maximize(
 	struct tinywl_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_maximize);
 	
-	/* Check if this is a dialog/modal window (has parent or is modal) */
-	bool is_dialog = (toplevel->xdg_toplevel->parent != NULL);
-	
-	if (is_dialog) {
+	/* Check if this is a dialog/modal window */
+	if (toplevel->is_dialog) {
 		/* This is a transient/modal dialog - REJECT maximize request */
 		return;
 	}
@@ -1326,8 +1401,8 @@ static void xdg_toplevel_request_fullscreen(
 		wl_container_of(listener, toplevel, request_fullscreen);
 	
 	/* Check if this is a dialog/modal window */
-	if (toplevel->xdg_toplevel->parent != NULL) {
-		/* This is a transient/modal dialog - REJECT fullscreen */
+	if (toplevel->is_dialog || toplevel->is_progress) {
+		/* This is a transient/modal dialog or progress window - REJECT fullscreen */
 		return;
 	}
 	
