@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <getopt.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -1031,11 +1032,24 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	toplevel->is_dialog = (toplevel->xdg_toplevel->parent != NULL);
 	toplevel->is_progress = false;
 	
+	/* Exception: Waydroid and similar containers should not be treated as dialogs even if they have parent */
+	if (toplevel->is_dialog && toplevel->xdg_toplevel->app_id) {
+		const char *app_id = toplevel->xdg_toplevel->app_id;
+		if (strstr(app_id, "waydroid") || strstr(app_id, "Waydroid") ||
+		    strstr(app_id, "container") || strstr(app_id, "Container")) {
+			toplevel->is_dialog = false;
+		}
+	}
+	
 	/* Additional dialog detection: common dialog/modal window titles/names */
 	if (!toplevel->is_dialog && toplevel->xdg_toplevel->title) {
 		const char *title = toplevel->xdg_toplevel->title;
+		/* Exception: Waydroid title should not be treated as dialog */
+		if (strstr(title, "Waydroid") || strstr(title, "waydroid")) {
+			/* Skip dialog detection for waydroid */
+		}
 		/* Detect progress windows and notifications */
-		if (strstr(title, "Progress") || strstr(title, "progress") ||
+		else if (strstr(title, "Progress") || strstr(title, "progress") ||
 		    strstr(title, "Notification") || strstr(title, "notification")) {
 			toplevel->is_progress = true;
 		}
@@ -1130,7 +1144,31 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	
 	/* For normal windows (non-dialog), restore saved state or center */
 	if (state_loaded) {
-		if (toplevel->maximized) {
+		/* Special case: Waydroid should ALWAYS be maximized, regardless of saved state */
+		bool is_waydroid = (toplevel->xdg_toplevel->app_id && 
+			(strstr(toplevel->xdg_toplevel->app_id, "Waydroid") || 
+			 strstr(toplevel->xdg_toplevel->app_id, "waydroid")));
+		
+		if (is_waydroid) {
+			struct tinywl_output *output;
+			if (!wl_list_empty(&server->outputs)) {
+				output = wl_container_of(server->outputs.next, output, link);
+				int out_width = 0, out_height = 0;
+				wlr_output_effective_resolution(output->wlr_output, &out_width, &out_height);
+				
+				struct wlr_box out_box;
+				wlr_output_layout_get_box(server->output_layout,
+					output->wlr_output, &out_box);
+				
+				int panel_height = tinywl_panel_get_height(server->panel);
+				wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
+				wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, out_width, 
+					out_height - panel_height);
+				wlr_scene_node_set_position(&toplevel->scene_tree->node, 
+					out_box.x, out_box.y);
+				toplevel->maximized = true;
+			}
+		} else if (toplevel->maximized) {
 			/* Window was previously maximized, restore that state */
 			struct tinywl_output *output;
 			if (!wl_list_empty(&server->outputs)) {
@@ -1162,8 +1200,45 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 				toplevel->saved_geometry.y);
 		}
 	} else {
-		/* No saved state: center new window on screen */
-		struct tinywl_output *output;
+		/* No saved state: check if this is Waydroid that should be maximized */
+		bool is_waydroid = false;
+		const char *app_id = toplevel->xdg_toplevel->app_id ?: "no-app-id";
+		const char *title = toplevel->xdg_toplevel->title ?: "no-title";
+		
+		if (toplevel->xdg_toplevel->app_id) {
+			if (strstr(app_id, "waydroid") || strstr(app_id, "Waydroid")) {
+				is_waydroid = true;
+			}
+		}
+		
+		/* Also check title as fallback */
+		if (!is_waydroid && strstr(title, "waydroid")) {
+			is_waydroid = true;
+		}
+		
+		/* Waydroid should be maximized by default */
+		if (is_waydroid) {
+			struct tinywl_output *output;
+			if (!wl_list_empty(&server->outputs)) {
+				output = wl_container_of(server->outputs.next, output, link);
+				int out_width = 0, out_height = 0;
+				wlr_output_effective_resolution(output->wlr_output, &out_width, &out_height);
+				
+				struct wlr_box out_box;
+				wlr_output_layout_get_box(server->output_layout,
+					output->wlr_output, &out_box);
+				
+				int panel_height = tinywl_panel_get_height(server->panel);
+				wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
+				wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, out_width,
+					out_height - panel_height);
+				wlr_scene_node_set_position(&toplevel->scene_tree->node,
+					out_box.x, out_box.y);
+				toplevel->maximized = true;
+			}
+		} else {
+			/* Normal window: center new window on screen */
+			struct tinywl_output *output;
 		if (!wl_list_empty(&server->outputs)) {
 			output = wl_container_of(server->outputs.next, output, link);
 
@@ -1210,6 +1285,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 			int y = out_box.y + (out_height - height) / 2;
 
 			wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+		}
 		}
 	}
 
