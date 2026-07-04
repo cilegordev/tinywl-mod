@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200112L
+#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <getopt.h>
 #include <stdbool.h>
@@ -10,6 +10,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <linux/vt.h>
 #include <linux/input-event-codes.h>
@@ -33,6 +35,46 @@ void restore_toplevel(struct tinywl_toplevel *toplevel);
 
 /* Forward declaration for dialog stacking */
 static void raise_dialogs_to_front(struct tinywl_server *server);
+
+/*
+ * Handles SIGINT/SIGTERM so that however this session ends — killed by a
+ * display manager on logout, Ctrl+C from a terminal, VT switch teardown,
+ * etc. — we always go through the normal wl_display_run() return path
+ * instead of dying immediately. Skipping that path skips wl_display_destroy(),
+ * which is what unlinks our Wayland socket/lock files under
+ * $XDG_RUNTIME_DIR; a leftover socket file there is enough to make other
+ * tools (e.g. neofetch) misdetect a Wayland session as still active long
+ * after tinywl has exited, until the next reboot clears the tmpfs.
+ *
+ * wl_event_loop_add_signal() is the wlroots/wayland-server safe way to
+ * handle POSIX signals (backed by signalfd, delivered on the event loop
+ * rather than a raw async-signal-context handler), so it's safe to call
+ * wl_display_terminate() directly here.
+ */
+static int handle_term_signal(int signal_number, void *data) {
+	struct wl_display *display = data;
+	wlr_log(WLR_INFO, "Received signal %d, shutting down", signal_number);
+	wl_display_terminate(display);
+	return 0;
+}
+
+/*
+ * Belt-and-suspenders cleanup: registered with atexit() right after the
+ * socket is created, so it runs no matter which return/exit path this
+ * process takes (including the various early "return 1" error branches
+ * in main(), not just the normal fallthrough at the end). Removing files
+ * that don't exist is harmless (unlink() just fails silently), so it's
+ * safe to always attempt both.
+ */
+static char wayland_socket_path[PATH_MAX];
+static char wayland_lock_path[PATH_MAX];
+
+static void cleanup_wayland_socket_files(void) {
+	if (wayland_socket_path[0])
+		unlink(wayland_socket_path);
+	if (wayland_lock_path[0])
+		unlink(wayland_lock_path);
+}
 
 struct tinywl_popup {
 	struct wl_list link;
@@ -1592,6 +1634,20 @@ int main(int argc, char *argv[]) {
 	/* Initialize window state persistence system */
 	init_window_state_system();
 
+	/*
+	 * Snapshot the environment as inherited (e.g. from a host X11/Xfce
+	 * session if tinywl is invoked nested from a terminal there) before
+	 * any of it gets overwritten below. Restored just before we return,
+	 * so nothing launched from within this tinywl session leaves the
+	 * calling shell/session pointed at Wayland resources that no longer
+	 * exist once tinywl exits.
+	 */
+	char *orig_xdg_runtime_dir = getenv("XDG_RUNTIME_DIR") ? strdup(getenv("XDG_RUNTIME_DIR")) : NULL;
+	char *orig_moz_wayland     = getenv("MOZ_ENABLE_WAYLAND") ? strdup(getenv("MOZ_ENABLE_WAYLAND")) : NULL;
+	char *orig_qt_platform     = getenv("QT_QPA_PLATFORM") ? strdup(getenv("QT_QPA_PLATFORM")) : NULL;
+	char *orig_gdk_backend     = getenv("GDK_BACKEND") ? strdup(getenv("GDK_BACKEND")) : NULL;
+	char *orig_wayland_display = getenv("WAYLAND_DISPLAY") ? strdup(getenv("WAYLAND_DISPLAY")) : NULL;
+
 	/* Setup Wayland environment for child processes */
 	if (!getenv("XDG_RUNTIME_DIR")) {
 		char runtime_dir[256];
@@ -1765,6 +1821,20 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
+	/*
+	 * Register cleanup for this exact socket/lock file immediately, before
+	 * anything else can fail and return early — see cleanup_wayland_socket_files
+	 * above for why this matters.
+	 */
+	const char *runtime_dir_for_socket = getenv("XDG_RUNTIME_DIR");
+	if (runtime_dir_for_socket) {
+		snprintf(wayland_socket_path, sizeof(wayland_socket_path),
+				"%s/%s", runtime_dir_for_socket, socket);
+		snprintf(wayland_lock_path, sizeof(wayland_lock_path),
+				"%s/%s.lock", runtime_dir_for_socket, socket);
+		atexit(cleanup_wayland_socket_files);
+	}
+
 	/* Start the backend. This will enumerate outputs and inputs, become the DRM
 	 * master, etc */
 	if (!wlr_backend_start(server.backend)) {
@@ -1827,7 +1897,30 @@ int main(int argc, char *argv[]) {
 	 * frame events at the refresh rate, and so on. */
 	wlr_log(WLR_INFO, "Running Wayland compositor on WAYLAND_DISPLAY=%s",
 			socket);
+
+	/*
+	 * Route SIGINT/SIGTERM through the event loop so any way this session
+	 * ends still reaches the normal shutdown path below (and therefore
+	 * wl_display_destroy()'s socket cleanup) instead of dying immediately.
+	 */
+	struct wl_event_loop *term_loop = wl_display_get_event_loop(server.wl_display);
+	wl_event_loop_add_signal(term_loop, SIGINT, handle_term_signal, server.wl_display);
+	wl_event_loop_add_signal(term_loop, SIGTERM, handle_term_signal, server.wl_display);
+
 	wl_display_run(server.wl_display);
+
+	/*
+	 * Remove the Wayland socket/lock files FIRST, before anything else in
+	 * shutdown. tinywl_services_destroy() below can block for up to ~2s
+	 * waiting for child services (xfsettingsd, gvfsd, pulseaudio, ...) to
+	 * exit; if the session manager's own logout timeout is shorter than
+	 * that, it SIGKILLs this whole process before reaching the atexit
+	 * handler, leaving a stale socket file that later confuses tools like
+	 * neofetch into thinking a Wayland session is still active. Doing it
+	 * here, immediately, means the socket is gone regardless of whether
+	 * the rest of shutdown gets to complete.
+	 */
+	cleanup_wayland_socket_files();
 
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
@@ -1840,5 +1933,23 @@ int main(int argc, char *argv[]) {
 	wlr_xcursor_manager_destroy(server.cursor_mgr);
 	wlr_output_layout_destroy(server.output_layout);
 	wl_display_destroy(server.wl_display);
+
+	/*
+	 * Restore the environment to what it was before this tinywl instance
+	 * touched it. Without this, WAYLAND_DISPLAY / GDK_BACKEND / QT_QPA_PLATFORM
+	 * left set to Wayland values after tinywl exits can make other
+	 * programs (including detection tools like neofetch) started
+	 * afterwards in the same environment wrongly assume a Wayland session
+	 * is still active and skip X11-based detection entirely.
+	 */
+#define RESTORE_ENV(name, saved) \
+	do { if (saved) { setenv(name, saved, 1); free(saved); } else { unsetenv(name); } } while (0)
+	RESTORE_ENV("XDG_RUNTIME_DIR", orig_xdg_runtime_dir);
+	RESTORE_ENV("MOZ_ENABLE_WAYLAND", orig_moz_wayland);
+	RESTORE_ENV("QT_QPA_PLATFORM", orig_qt_platform);
+	RESTORE_ENV("GDK_BACKEND", orig_gdk_backend);
+	RESTORE_ENV("WAYLAND_DISPLAY", orig_wayland_display);
+#undef RESTORE_ENV
+
 	return 0;
 }

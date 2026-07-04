@@ -42,6 +42,18 @@ struct tinywl_services {
 
     /* Set to true once XWayland emits the "ready" signal */
     bool                         xwayland_ready_flag;
+
+    /*
+     * Snapshot of the environment as inherited from whatever launched us
+     * (a login shell, a display manager, or a host desktop session such as
+     * Xfce when tinywl is run nested for testing). Saved before we touch
+     * DISPLAY / DBUS_SESSION_BUS_ADDRESS so the host session is never left
+     * pointing at resources that belong to this tinywl instance and get
+     * torn down when it exits.
+     */
+    char                        *orig_display;
+    char                        *orig_dbus_addr;
+    bool                         private_dbus;
 };
 
 /* Internal helpers */
@@ -129,13 +141,21 @@ static char *find_polkit_agent(void) {
 
 /* D-Bus session bus */
 
-static pid_t start_dbus_session(void) {
-    /* If a bus is already running (e.g. user session via systemd), honour it */
-    if (getenv("DBUS_SESSION_BUS_ADDRESS")) {
-        wlr_log(WLR_INFO, "services: D-Bus session already available at %s",
-                getenv("DBUS_SESSION_BUS_ADDRESS"));
-        return 0; /* 0 = not our child */
-    }
+static pid_t start_dbus_session(struct tinywl_services *svc) {
+    /*
+     * Always spawn a private session bus for tinywl's own services
+     * (xfsettingsd, gvfsd, dconf-service, polkit-agent, ...), even if
+     * DBUS_SESSION_BUS_ADDRESS is already set in the inherited environment.
+     *
+     * On systemd-logind systems that address is the user bus shared across
+     * *every* login session of the same UID, not per-graphical-session. If
+     * tinywl reuses it, single-instance daemons it starts register
+     * themselves on the same bus the host desktop (e.g. Xfce) uses, and
+     * when tinywl exits and SIGKILLs its tracked children, it kills those
+     * shared-bus registrations out from under the host session too.
+     */
+    svc->orig_dbus_addr = getenv("DBUS_SESSION_BUS_ADDRESS")
+        ? strdup(getenv("DBUS_SESSION_BUS_ADDRESS")) : NULL;
 
     /* Create a pipe to read the bus address from dbus-daemon */
     int pipefd[2];
@@ -206,7 +226,8 @@ static pid_t start_dbus_session(void) {
     }
 
     setenv("DBUS_SESSION_BUS_ADDRESS", addr, 1);
-    wlr_log(WLR_INFO, "services: D-Bus session bus at %s (pid %d)", addr, pid);
+    svc->private_dbus = true;
+    wlr_log(WLR_INFO, "services: private D-Bus session bus at %s (pid %d)", addr, pid);
     return pid;
 }
 
@@ -231,17 +252,22 @@ static void handle_xwayland_ready(struct wl_listener *listener, void *data) {
     svc->xwayland_ready_flag = true;
 
     /*
-     * Now that DISPLAY is set, (re)start the settings daemon so it can
-     * register X11 root-window properties (e.g. DPI, font, cursor theme).
-     * If it was already started before XWayland was ready, the daemon itself
-     * will retry the X11 connection; a second spawn is harmless because most
-     * settings daemons are single-instance (they exit if already running).
+     * Start the settings daemon now that DISPLAY definitely points at
+     * *our* XWayland, so it can register X11 root-window properties
+     * (DPI, font, cursor theme) on tinywl's display and nothing else.
+     *
+     * This is the ONLY place xfsettingsd is spawned. Spawning it earlier
+     * (before this callback) would use whatever DISPLAY was inherited at
+     * process start — e.g. a host Xfce session's own :0 — and register a
+     * single-instance daemon on the shared D-Bus bus against the wrong
+     * display, which then gets killed out from under that host session
+     * when tinywl_services_destroy() runs.
      */
     if (program_exists("xfsettingsd")) {
         char *argv[] = { "xfsettingsd", NULL };
         pid_t pid = spawn_service("xfsettingsd", argv);
         if (pid > 0)
-            record_pid(svc, pid, "xfsettingsd(post-xwayland)");
+            record_pid(svc, pid, "xfsettingsd");
     }
 }
 
@@ -363,20 +389,6 @@ static void start_audio(struct tinywl_services *svc) {
     }
 }
 
-/* XFCE settings daemon (provides theme / DPI / keyboard settings) */
-static void start_settings_daemon(struct tinywl_services *svc) {
-    /*
-     * Settings daemon that communicates over D-Bus.
-     * xfsettingsd provides theme, DPI, and keyboard settings.
-     */
-    if (program_exists("xfsettingsd")) {
-        char *argv[] = { "xfsettingsd", NULL };
-        pid_t pid = spawn_service("xfsettingsd", argv);
-        if (pid > 0)
-            record_pid(svc, pid, "xfsettingsd");
-    }
-}
-
 /* dconf service (GSettings backend) */
 
 static void start_dconf(struct tinywl_services *svc) {
@@ -398,16 +410,27 @@ struct tinywl_services *tinywl_services_init(struct tinywl_server *server) {
     svc->server = server;
 
     /*
-     * 1. D-Bus session bus — must be first, everything else depends on it.
+     * Snapshot DISPLAY as inherited from whatever launched tinywl, before
+     * anything in this file has a chance to overwrite it. Restored in
+     * tinywl_services_destroy() so a host session (e.g. Xfce, if tinywl was
+     * started nested inside it for testing) never keeps pointing at a
+     * display that belonged to this tinywl instance after it exits.
      */
-    pid_t dbus_pid = start_dbus_session();
+    svc->orig_display = getenv("DISPLAY") ? strdup(getenv("DISPLAY")) : NULL;
+
+    /*
+     * 1. D-Bus session bus — must be first, everything else depends on it.
+     *    Always private to this tinywl instance (see start_dbus_session).
+     */
+    pid_t dbus_pid = start_dbus_session(svc);
     if (dbus_pid > 0)
         record_pid(svc, dbus_pid, "dbus-daemon");
-    /* dbus_pid == 0 means we reused an existing bus — that's fine */
 
     /*
      * 2. XWayland — start early so DISPLAY is available for X11 clients.
      *    The ready signal fires asynchronously once the event loop runs.
+     *    xfsettingsd is spawned from that same callback (handle_xwayland_ready),
+     *    once DISPLAY definitely points at our own XWayland — not before.
      */
     start_xwayland(svc);
 
@@ -417,23 +440,17 @@ struct tinywl_services *tinywl_services_init(struct tinywl_server *server) {
     start_dconf(svc);
 
     /*
-     * 4. XFCE / GNOME settings daemon
-     *    (must be after D-Bus, may need DISPLAY — which XWayland will set)
-     */
-    start_settings_daemon(svc);
-
-    /*
-     * 5. GVFS — virtual filesystem, needed for external drives / Trash
+     * 4. GVFS — virtual filesystem, needed for external drives / Trash
      */
     start_gvfs(svc);
 
     /*
-     * 6. Polkit authentication agent
+     * 5. Polkit authentication agent
      */
     start_polkit(svc);
 
     /*
-     * 7. Audio daemon (PipeWire or PulseAudio)
+     * 6. Audio daemon (PipeWire or PulseAudio)
      */
     start_audio(svc);
 
@@ -475,6 +492,26 @@ void tinywl_services_destroy(struct tinywl_services *svc) {
             }
         }
     }
+
+    /*
+     * Restore the environment to what it was before this tinywl instance
+     * touched it, so a process tree that outlives this compositor run (or
+     * a host session it was nested inside) is never left pointing at a
+     * DISPLAY / D-Bus bus that no longer exists.
+     */
+    if (svc->orig_display)
+        setenv("DISPLAY", svc->orig_display, 1);
+    else
+        unsetenv("DISPLAY");
+    free(svc->orig_display);
+
+    if (svc->private_dbus) {
+        if (svc->orig_dbus_addr)
+            setenv("DBUS_SESSION_BUS_ADDRESS", svc->orig_dbus_addr, 1);
+        else
+            unsetenv("DBUS_SESSION_BUS_ADDRESS");
+    }
+    free(svc->orig_dbus_addr);
 
     free(svc);
 }
