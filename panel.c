@@ -693,9 +693,45 @@ void tinywl_panel_on_unmap(struct tinywl_panel *p, struct tinywl_toplevel *tople
     wl_list_init(&p->tasks[found].set_title.link);
     wl_list_init(&p->tasks[found].destroy.link);
 
-    /* Compact array */
-    for (int i = found; i < p->n_tasks - 1; i++)
-        p->tasks[i] = p->tasks[i + 1];
+    /*
+     * Shift the remaining tasks down WITHOUT copying live wl_listener
+     * structs by value. `p->tasks[i] = p->tasks[i + 1]` looks harmless but
+     * a struct assignment copies the wl_listener's `link` pointer values
+     * as raw bytes; the wl_signal that owns that listener (embedded in
+     * the corresponding xdg_toplevel, untouched by this code) keeps
+     * pointing at the OLD slot's address, not the new one. Any later
+     * event on that signal — including the memset() that used to run on
+     * the vacated last slot right after this loop — then reads/writes a
+     * listener_list node through a stale address, corrupting the list
+     * (or zeroing a still-referenced `notify` pointer) and eventually
+     * crashing with a jump through a garbage/NULL function pointer.
+     *
+     * Instead, explicitly unregister each shifted task's listeners from
+     * their old address and re-register them at the new one.
+     */
+    for (int i = found; i < p->n_tasks - 1; i++) {
+        struct tinywl_toplevel *moved_toplevel = p->tasks[i + 1].toplevel;
+
+        wl_list_remove(&p->tasks[i + 1].set_title.link);
+        wl_list_remove(&p->tasks[i + 1].destroy.link);
+
+        p->tasks[i].toplevel = moved_toplevel;
+        p->tasks[i].panel    = p->tasks[i + 1].panel;
+        p->tasks[i].x        = p->tasks[i + 1].x;
+        p->tasks[i].w        = p->tasks[i + 1].w;
+
+        p->tasks[i].set_title.notify = on_task_set_title;
+        wl_signal_add(&moved_toplevel->xdg_toplevel->events.set_title,
+                      &p->tasks[i].set_title);
+
+        p->tasks[i].destroy.notify = on_task_destroy;
+        wl_signal_add(&moved_toplevel->xdg_toplevel->base->events.destroy,
+                      &p->tasks[i].destroy);
+
+        wl_list_init(&p->tasks[i + 1].set_title.link);
+        wl_list_init(&p->tasks[i + 1].destroy.link);
+        p->tasks[i + 1].toplevel = NULL;
+    }
 
     p->n_tasks--;
     memset(&p->tasks[p->n_tasks], 0, sizeof(p->tasks[0]));
