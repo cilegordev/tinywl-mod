@@ -568,6 +568,38 @@ static void seat_request_start_drag(struct wl_listener *listener, void *data) {
        /* If serial is invalid, silently drop the drag request (no harm). */
 }
 
+static void seat_start_drag(struct wl_listener *listener, void *data) {
+       /*
+        * Fired once wlr_seat_start_pointer_drag() actually begins the drag
+        * (as opposed to request_start_drag above, which only asks for one).
+        * If the client attached an icon surface, put it in the scene graph
+        * so it's actually visible following the cursor — otherwise the
+        * drag works (data still transfers on drop) but nothing is drawn,
+        * which is what made it look like there was no drag feedback at all.
+        */
+       struct tinywl_server *server = wl_container_of(
+                       listener, server, start_drag);
+       struct wlr_drag *drag = data;
+
+       if (!drag->icon) {
+               return;
+       }
+
+       wlr_scene_drag_icon_create(server->drag_icon, drag->icon);
+
+       /*
+        * The drag_icon tree was created once at startup, before any
+        * background/panel/toplevel/menu nodes existed, so it normally
+        * sits at the very bottom of the scene's stacking order — hidden
+        * behind everything else. Raise it to the top of its parent's
+        * children every time a drag actually starts so it renders above
+        * whatever is currently on screen.
+        */
+       wlr_scene_node_raise_to_top(&server->drag_icon->node);
+       wlr_scene_node_set_position(&server->drag_icon->node,
+                       server->cursor->x, server->cursor->y);
+}
+
 static struct tinywl_toplevel *desktop_toplevel_at(
 		struct tinywl_server *server, double lx, double ly,
 		struct wlr_surface **surface, double *sx, double *sy) {
@@ -669,6 +701,12 @@ static void process_cursor_resize(struct tinywl_server *server, uint32_t time) {
 }
 
 static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
+	/* Keep the drag-and-drop icon (if any) following the cursor. Cheap to
+	 * call even when no drag is active, since drag_icon has no children
+	 * then. */
+	wlr_scene_node_set_position(&server->drag_icon->node,
+			server->cursor->x, server->cursor->y);
+
 	/* If the mode is non-passthrough, delegate to those functions. */
 	if (server->cursor_mode == TINYWL_CURSOR_MOVE) {
 		process_cursor_move(server, time);
@@ -1748,6 +1786,14 @@ int main(int argc, char *argv[]) {
 	server.scene = wlr_scene_create();
 	server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
 
+	/*
+	 * Dedicated scene tree that drag-and-drop icons get attached to
+	 * (see seat_start_drag / process_cursor_motion). Created once here
+	 * so it always exists as a stable parent, whether or not a drag is
+	 * currently in progress.
+	 */
+	server.drag_icon = wlr_scene_tree_create(&server.scene->tree);
+
 	/* Set up xdg-shell version 3. The xdg-shell is a Wayland protocol which is
 	 * used for application windows. For more detail on shells, refer to
 	 * https://drewdevault.com/2018/07/29/Wayland-shells.html.
@@ -1814,6 +1860,9 @@ int main(int argc, char *argv[]) {
         server.request_start_drag.notify = seat_request_start_drag;
         wl_signal_add(&server.seat->events.request_start_drag,
                         &server.request_start_drag);
+        server.start_drag.notify = seat_start_drag;
+        wl_signal_add(&server.seat->events.start_drag,
+                        &server.start_drag);
 	/*
 	 * Initialize right-click popup menu.
 	 * This menu replicates the system.twmrc "defops" menu from TWM,

@@ -94,6 +94,8 @@ struct tinywl_server {
     struct wl_listener             request_cursor;
     struct wl_listener             request_set_selection;
     struct wl_listener             request_start_drag;
+    struct wl_listener             start_drag;
+    struct wlr_scene_tree         *drag_icon;
     struct wl_list                 keyboards;
     tinywl_cursor_mode             cursor_mode;
     struct tinywl_toplevel        *grabbed_toplevel;
