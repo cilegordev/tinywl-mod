@@ -42,18 +42,6 @@ struct tinywl_services {
 
     /* Set to true once XWayland emits the "ready" signal */
     bool                         xwayland_ready_flag;
-
-    /*
-     * Snapshot of the environment as inherited from whatever launched us
-     * (a login shell, a display manager, or a host desktop session such as
-     * Xfce when tinywl is run nested for testing). Saved before we touch
-     * DISPLAY / DBUS_SESSION_BUS_ADDRESS so the host session is never left
-     * pointing at resources that belong to this tinywl instance and get
-     * torn down when it exits.
-     */
-    char                        *orig_display;
-    char                        *orig_dbus_addr;
-    bool                         private_dbus;
 };
 
 /* Internal helpers */
@@ -141,21 +129,13 @@ static char *find_polkit_agent(void) {
 
 /* D-Bus session bus */
 
-static pid_t start_dbus_session(struct tinywl_services *svc) {
-    /*
-     * Always spawn a private session bus for tinywl's own services
-     * (xfsettingsd, gvfsd, dconf-service, polkit-agent, ...), even if
-     * DBUS_SESSION_BUS_ADDRESS is already set in the inherited environment.
-     *
-     * On systemd-logind systems that address is the user bus shared across
-     * *every* login session of the same UID, not per-graphical-session. If
-     * tinywl reuses it, single-instance daemons it starts register
-     * themselves on the same bus the host desktop (e.g. Xfce) uses, and
-     * when tinywl exits and SIGKILLs its tracked children, it kills those
-     * shared-bus registrations out from under the host session too.
-     */
-    svc->orig_dbus_addr = getenv("DBUS_SESSION_BUS_ADDRESS")
-        ? strdup(getenv("DBUS_SESSION_BUS_ADDRESS")) : NULL;
+static pid_t start_dbus_session(void) {
+    /* If a bus is already running (e.g. user session via systemd), honour it */
+    if (getenv("DBUS_SESSION_BUS_ADDRESS")) {
+        wlr_log(WLR_INFO, "services: D-Bus session already available at %s",
+                getenv("DBUS_SESSION_BUS_ADDRESS"));
+        return 0; /* 0 = not our child */
+    }
 
     /* Create a pipe to read the bus address from dbus-daemon */
     int pipefd[2];
@@ -226,8 +206,7 @@ static pid_t start_dbus_session(struct tinywl_services *svc) {
     }
 
     setenv("DBUS_SESSION_BUS_ADDRESS", addr, 1);
-    svc->private_dbus = true;
-    wlr_log(WLR_INFO, "services: private D-Bus session bus at %s (pid %d)", addr, pid);
+    wlr_log(WLR_INFO, "services: D-Bus session bus at %s (pid %d)", addr, pid);
     return pid;
 }
 
@@ -410,21 +389,12 @@ struct tinywl_services *tinywl_services_init(struct tinywl_server *server) {
     svc->server = server;
 
     /*
-     * Snapshot DISPLAY as inherited from whatever launched tinywl, before
-     * anything in this file has a chance to overwrite it. Restored in
-     * tinywl_services_destroy() so a host session (e.g. Xfce, if tinywl was
-     * started nested inside it for testing) never keeps pointing at a
-     * display that belonged to this tinywl instance after it exits.
-     */
-    svc->orig_display = getenv("DISPLAY") ? strdup(getenv("DISPLAY")) : NULL;
-
-    /*
      * 1. D-Bus session bus — must be first, everything else depends on it.
-     *    Always private to this tinywl instance (see start_dbus_session).
      */
-    pid_t dbus_pid = start_dbus_session(svc);
+    pid_t dbus_pid = start_dbus_session();
     if (dbus_pid > 0)
         record_pid(svc, dbus_pid, "dbus-daemon");
+    /* dbus_pid == 0 means we reused an existing bus — that's fine */
 
     /*
      * 2. XWayland — start early so DISPLAY is available for X11 clients.
@@ -492,26 +462,6 @@ void tinywl_services_destroy(struct tinywl_services *svc) {
             }
         }
     }
-
-    /*
-     * Restore the environment to what it was before this tinywl instance
-     * touched it, so a process tree that outlives this compositor run (or
-     * a host session it was nested inside) is never left pointing at a
-     * DISPLAY / D-Bus bus that no longer exists.
-     */
-    if (svc->orig_display)
-        setenv("DISPLAY", svc->orig_display, 1);
-    else
-        unsetenv("DISPLAY");
-    free(svc->orig_display);
-
-    if (svc->private_dbus) {
-        if (svc->orig_dbus_addr)
-            setenv("DBUS_SESSION_BUS_ADDRESS", svc->orig_dbus_addr, 1);
-        else
-            unsetenv("DBUS_SESSION_BUS_ADDRESS");
-    }
-    free(svc->orig_dbus_addr);
 
     free(svc);
 }

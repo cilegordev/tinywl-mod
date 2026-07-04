@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _POSIX_C_SOURCE 200112L
 #include <assert.h>
 #include <getopt.h>
 #include <stdbool.h>
@@ -1344,21 +1344,49 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	/* Called when the surface is unmapped, and should no longer be shown. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
+	struct tinywl_server *server = toplevel->server;
 
 	/* If window was in fullscreen, show panel again */
 	if (toplevel->fullscreen) {
-		tinywl_panel_show(toplevel->server->panel);
+		tinywl_panel_show(server->panel);
 		toplevel->fullscreen = false;
 	}
 
 	/* Reset the cursor mode if the grabbed toplevel was unmapped. */
-	if (toplevel == toplevel->server->grabbed_toplevel) {
-		reset_cursor_mode(toplevel->server);
+	if (toplevel == server->grabbed_toplevel) {
+		reset_cursor_mode(server);
 	}
 
+	/*
+	 * If this window held keyboard focus (e.g. a short-lived dialog like
+	 * pinentry or a file picker closing), pass focus back to another
+	 * window instead of leaving the seat with no focused surface — which
+	 * is what made focus seem "stuck" until something was clicked
+	 * manually.
+	 */
+	bool was_focused = server->seat->keyboard_state.focused_surface ==
+			toplevel->xdg_toplevel->base->surface;
+
 	/* Remove this window from the taskbar */
-	tinywl_panel_on_unmap(toplevel->server->panel, toplevel);
+	tinywl_panel_on_unmap(server->panel, toplevel);
 	wl_list_remove(&toplevel->link);
+
+	if (was_focused) {
+		struct tinywl_toplevel *next = NULL;
+		struct tinywl_toplevel *t;
+		wl_list_for_each(t, &server->toplevels, link) {
+			if (!t->minimized) {
+				next = t;
+				break;
+			}
+		}
+		if (next) {
+			focus_toplevel(next, next->xdg_toplevel->base->surface);
+		} else {
+			wlr_seat_keyboard_notify_clear_focus(server->seat);
+			tinywl_panel_on_focus(server->panel, NULL);
+		}
+	}
 }
 
 static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
@@ -1633,20 +1661,6 @@ int main(int argc, char *argv[]) {
 
 	/* Initialize window state persistence system */
 	init_window_state_system();
-
-	/*
-	 * Snapshot the environment as inherited (e.g. from a host X11/Xfce
-	 * session if tinywl is invoked nested from a terminal there) before
-	 * any of it gets overwritten below. Restored just before we return,
-	 * so nothing launched from within this tinywl session leaves the
-	 * calling shell/session pointed at Wayland resources that no longer
-	 * exist once tinywl exits.
-	 */
-	char *orig_xdg_runtime_dir = getenv("XDG_RUNTIME_DIR") ? strdup(getenv("XDG_RUNTIME_DIR")) : NULL;
-	char *orig_moz_wayland     = getenv("MOZ_ENABLE_WAYLAND") ? strdup(getenv("MOZ_ENABLE_WAYLAND")) : NULL;
-	char *orig_qt_platform     = getenv("QT_QPA_PLATFORM") ? strdup(getenv("QT_QPA_PLATFORM")) : NULL;
-	char *orig_gdk_backend     = getenv("GDK_BACKEND") ? strdup(getenv("GDK_BACKEND")) : NULL;
-	char *orig_wayland_display = getenv("WAYLAND_DISPLAY") ? strdup(getenv("WAYLAND_DISPLAY")) : NULL;
 
 	/* Setup Wayland environment for child processes */
 	if (!getenv("XDG_RUNTIME_DIR")) {
@@ -1933,23 +1947,6 @@ int main(int argc, char *argv[]) {
 	wlr_xcursor_manager_destroy(server.cursor_mgr);
 	wlr_output_layout_destroy(server.output_layout);
 	wl_display_destroy(server.wl_display);
-
-	/*
-	 * Restore the environment to what it was before this tinywl instance
-	 * touched it. Without this, WAYLAND_DISPLAY / GDK_BACKEND / QT_QPA_PLATFORM
-	 * left set to Wayland values after tinywl exits can make other
-	 * programs (including detection tools like neofetch) started
-	 * afterwards in the same environment wrongly assume a Wayland session
-	 * is still active and skip X11-based detection entirely.
-	 */
-#define RESTORE_ENV(name, saved) \
-	do { if (saved) { setenv(name, saved, 1); free(saved); } else { unsetenv(name); } } while (0)
-	RESTORE_ENV("XDG_RUNTIME_DIR", orig_xdg_runtime_dir);
-	RESTORE_ENV("MOZ_ENABLE_WAYLAND", orig_moz_wayland);
-	RESTORE_ENV("QT_QPA_PLATFORM", orig_qt_platform);
-	RESTORE_ENV("GDK_BACKEND", orig_gdk_backend);
-	RESTORE_ENV("WAYLAND_DISPLAY", orig_wayland_display);
-#undef RESTORE_ENV
 
 	return 0;
 }
