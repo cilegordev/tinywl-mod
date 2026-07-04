@@ -39,7 +39,7 @@ tinywl: tinywl.c services.c menu.c background.c panel.c window-state.c tinywl.h 
 		$(XWAYLAND_CFLAGS) \
 		-o $@ tinywl.c services.c menu.c background.c panel.c window-state.c \
 		$(LIBS)
-	@echo "Enjoy...!"
+	@echo "Done!"
 
 clean:
 	rm -f tinywl xdg-shell-protocol.c xdg-shell-protocol.h debug.log
@@ -47,11 +47,13 @@ clean:
 
 install: tinywl
 	cp tinywl /bin/tinywl
-	@echo "tinywl-mod installed to /bin/tinywl"
+	cp tinywl.desktop /usr/share/wayland-sessions/
+	@echo "tinywl-mod installed!"
 
 uninstall:
 	rm -f /bin/tinywl
-	@echo "tinywl-mod removed from /bin/tinywl"
+	rm -f /usr/share/wayland-sessions/tinywl.desktop
+	@echo "tinywl-mod uninstalled!"
 
 .DEFAULT_GOAL=tinywl
 .PHONY: clean install uninstall
