@@ -1102,9 +1102,19 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	 * so new apps that prefer Wayland when WAYLAND_DISPLAY is set end up
 	 * silently connecting to this now-invisible compositor instead of
 	 * the host session, instead of appearing on screen anywhere.
+	 *
+	 * Restricted to nested backends (X11/Wayland) only: on a real DRM/KMS
+	 * session started from a login display manager, momentary output
+	 * churn (mode changes, lease/master handoff during a VT switch,
+	 * hotplug rescans) can transiently leave the output list empty
+	 * without the session actually having ended. Terminating there too
+	 * killed the whole compositor prematurely and unpredictably, which
+	 * is what made logging back in via the display manager fail until it
+	 * was restarted.
 	 */
-	if (wl_list_empty(&server->outputs)) {
-		wlr_log(WLR_INFO, "Last output destroyed, shutting down");
+	if (wl_list_empty(&server->outputs) &&
+			tinywl_backend_is_nested(server->backend)) {
+		wlr_log(WLR_INFO, "Last (nested) output destroyed, shutting down");
 		wl_display_terminate(server->wl_display);
 	}
 }

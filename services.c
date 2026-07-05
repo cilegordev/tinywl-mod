@@ -20,30 +20,31 @@
 #include <wlr/xwayland.h>
 #include <wlr/backend.h>
 #include <wlr/backend/x11.h>
+#include <wlr/backend/wayland.h>
 #include <wlr/backend/multi.h>
 
 /*
  * wlr_backend_autocreate() always wraps whatever it picks in a multi-backend
  * (this has been true since wlroots' backend.c was rewritten years ago), so
- * server->backend is never itself the X11 backend even when running nested
- * inside an existing X11 session — it's the multi-backend container around
- * it. wlr_backend_is_x11() on the container alone always returns false;
- * we have to walk its children to find out.
+ * server->backend is never itself the X11/Wayland backend even when running
+ * nested inside an existing session — it's the multi-backend container
+ * around it. wlr_backend_is_x11()/wlr_backend_is_wl() on the container
+ * alone always return false; we have to walk its children to find out.
  */
-static void mark_if_x11(struct wlr_backend *backend, void *data) {
+static void mark_if_nested(struct wlr_backend *backend, void *data) {
     bool *found = data;
-    if (wlr_backend_is_x11(backend)) {
+    if (wlr_backend_is_x11(backend) || wlr_backend_is_wl(backend)) {
         *found = true;
     }
 }
 
-static bool backend_is_nested_x11(struct wlr_backend *backend) {
-    if (wlr_backend_is_x11(backend)) {
+bool tinywl_backend_is_nested(struct wlr_backend *backend) {
+    if (wlr_backend_is_x11(backend) || wlr_backend_is_wl(backend)) {
         return true;
     }
     if (wlr_backend_is_multi(backend)) {
         bool found = false;
-        wlr_multi_for_each_backend(backend, mark_if_x11, &found);
+        wlr_multi_for_each_backend(backend, mark_if_nested, &found);
         return found;
     }
     return false;
@@ -277,7 +278,7 @@ static void handle_xwayland_ready(struct wl_listener *listener, void *data) {
      * D-Bus regardless of which X display it's pointed at, so the host
      * session's own instance would conflict with ours anyway.
      */
-    bool nested = backend_is_nested_x11(svc->server->backend);
+    bool nested = tinywl_backend_is_nested(svc->server->backend);
     if (!nested && program_exists("xfsettingsd")) {
         char *argv[] = { "xfsettingsd", NULL };
         pid_t pid = spawn_service("xfsettingsd", argv);
@@ -438,7 +439,7 @@ struct tinywl_services *tinywl_services_init(struct tinywl_server *server) {
      * outright errors ("An authentication agent already exists ...")
      * instead of silently coexisting. Skip them entirely when nested.
      */
-    bool nested = backend_is_nested_x11(server->backend);
+    bool nested = tinywl_backend_is_nested(server->backend);
     if (nested) {
         wlr_log(WLR_INFO,
             "services: running nested inside an existing X11 session; "
