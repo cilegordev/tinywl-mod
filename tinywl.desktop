@@ -1,5 +1,9 @@
 [Desktop Entry]
 Name=tinywl
-Comment=
+Comment=This is the "minimum viable product" Wayland compositor based on wlroots.
 Exec=tinywl
 Type=Application
+Icon=/usr/share/pixmaps/cat.png
+Path=
+Terminal=false
+StartupNotify=false

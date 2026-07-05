@@ -299,15 +299,58 @@ static struct wlr_buffer *upload_via_shm(struct tinywl_background *bg,
 
 /* Public API */
 
-struct tinywl_background *tinywl_background_create(struct tinywl_server *server)
+/*
+ * background_cleanup_resources() - Tear down everything created by a
+ * previous generation of the wallpaper (scene node, internal wl_shm
+ * client, shared memory) WITHOUT freeing the tinywl_background struct
+ * itself, so the same struct/pointer can be reused for a fresh
+ * generation (see tinywl_background_resize below).
+ */
+static void background_cleanup_resources(struct tinywl_background *bg)
 {
-    struct tinywl_background *bg = calloc(1, sizeof(*bg));
-    if (!bg) {
-        wlr_log(WLR_ERROR, "background: out of memory");
-        return NULL;
-    }
-    bg->memfd = -1;
+    if (bg->scene_buf)
+        wlr_scene_node_destroy(&bg->scene_buf->node);
+    if (bg->scene_rect)
+        wlr_scene_node_destroy(&bg->scene_rect->node);
+    bg->scene_buf = NULL;
+    bg->scene_rect = NULL;
 
+    if (bg->wl_buf)
+        wl_buffer_destroy(bg->wl_buf);
+    if (bg->shm_ctx.shm)
+        wl_shm_destroy(bg->shm_ctx.shm);
+    if (bg->shm_ctx.registry)
+        wl_registry_destroy(bg->shm_ctx.registry);
+    if (bg->shm_ctx.display)
+        wl_display_disconnect(bg->shm_ctx.display);
+    bg->wl_buf = NULL;
+    memset(&bg->shm_ctx, 0, sizeof(bg->shm_ctx));
+
+    if (bg->wl_client)
+        wl_client_destroy(bg->wl_client);
+    bg->wl_client = NULL;
+
+    if (bg->memdata)
+        munmap(bg->memdata, bg->memsize);
+    if (bg->memfd >= 0)
+        close(bg->memfd);
+    bg->memdata = NULL;
+    bg->memsize = 0;
+    bg->memfd = -1;
+}
+
+/*
+ * background_regenerate() - (Re)builds the wallpaper (or solid-colour
+ * fallback) into an already-allocated tinywl_background struct, sized to
+ * whatever the first output currently reports. Used both for the initial
+ * creation and for resizing when an output's resolution changes (e.g. the
+ * nested X11 backend's host window being resized/maximized after tinywl
+ * has already started, which does not happen at startup and was
+ * previously never handled at all).
+ */
+static void background_regenerate(struct tinywl_background *bg,
+                                   struct tinywl_server *server)
+{
     /* Determine output resolution */
     int out_w = 1920, out_h = 1080; /* sane defaults if no output yet */
     struct wlr_box out_box = {0};
@@ -350,6 +393,8 @@ struct tinywl_background *tinywl_background_create(struct tinywl_server *server)
      * Because tinywl_background_create() is called before the menu is
      * initialised and before any toplevels exist, this node ends up at the
      * bottom of the scene graph and is therefore rendered behind everything.
+     * On a resize (background_regenerate called again later), it's placed
+     * back at the root the same way, so it stays behind existing windows.
      */
     bg->scene_buf = wlr_scene_buffer_create(&server->scene->tree, wlr_buf);
     if (!bg->scene_buf) {
@@ -360,11 +405,12 @@ struct tinywl_background *tinywl_background_create(struct tinywl_server *server)
 
     wlr_scene_node_set_position(&bg->scene_buf->node,
                                  out_box.x, out_box.y);
+    wlr_scene_node_lower_to_bottom(&bg->scene_buf->node);
 
     wlr_log(WLR_INFO,
             "background: wallpaper '%s' displayed at (%d,%d) %dx%d",
             BACKGROUND_IMAGE_PATH, out_box.x, out_box.y, out_w, out_h);
-    return bg;
+    return;
 
 fallback:
     {
@@ -372,12 +418,36 @@ fallback:
         static const float dark[4] = { 0.118f, 0.118f, 0.180f, 1.0f };
         bg->scene_rect = wlr_scene_rect_create(
             &server->scene->tree, out_w, out_h, dark);
-        if (bg->scene_rect)
+        if (bg->scene_rect) {
             wlr_scene_node_set_position(&bg->scene_rect->node,
                                          out_box.x, out_box.y);
+            wlr_scene_node_lower_to_bottom(&bg->scene_rect->node);
+        }
         wlr_log(WLR_INFO, "background: solid colour fallback active");
     }
+}
+
+struct tinywl_background *tinywl_background_create(struct tinywl_server *server)
+{
+    struct tinywl_background *bg = calloc(1, sizeof(*bg));
+    if (!bg) {
+        wlr_log(WLR_ERROR, "background: out of memory");
+        return NULL;
+    }
+    bg->memfd = -1;
+
+    background_regenerate(bg, server);
     return bg;
+}
+
+void tinywl_background_resize(struct tinywl_background *bg, struct tinywl_server *server)
+{
+    if (!bg)
+        return;
+
+    background_cleanup_resources(bg);
+    bg->memfd = -1;
+    background_regenerate(bg, server);
 }
 
 void tinywl_background_destroy(struct tinywl_background *bg)
@@ -385,35 +455,6 @@ void tinywl_background_destroy(struct tinywl_background *bg)
     if (!bg)
         return;
 
-    /*
-     * Scene nodes are part of the scene graph.  We destroy them here only
-     * if the caller has not already destroyed the whole scene tree via
-     * wlr_scene_node_destroy().  In tinywl, tinywl_background_destroy()
-     * is called before wlr_scene_node_destroy(), so this is safe.
-     */
-    if (bg->scene_buf)
-        wlr_scene_node_destroy(&bg->scene_buf->node);
-    if (bg->scene_rect)
-        wlr_scene_node_destroy(&bg->scene_rect->node);
-
-    /* Release wl_shm client-side resources first */
-    if (bg->wl_buf)
-        wl_buffer_destroy(bg->wl_buf);
-    if (bg->shm_ctx.shm)
-        wl_shm_destroy(bg->shm_ctx.shm);
-    if (bg->shm_ctx.registry)
-        wl_registry_destroy(bg->shm_ctx.registry);
-    if (bg->shm_ctx.display)
-        wl_display_disconnect(bg->shm_ctx.display);
-
-    /* Then destroy the server-side client */
-    if (bg->wl_client)
-        wl_client_destroy(bg->wl_client);
-
-    if (bg->memdata)
-        munmap(bg->memdata, bg->memsize);
-    if (bg->memfd >= 0)
-        close(bg->memfd);
-
+    background_cleanup_resources(bg);
     free(bg);
 }

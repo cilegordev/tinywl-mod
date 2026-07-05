@@ -11,6 +11,8 @@ struct tinywl_toplevel;
 
 struct tinywl_panel *tinywl_panel_create(struct tinywl_server *server);
 
+void tinywl_panel_resize(struct tinywl_panel *p, struct tinywl_server *server);
+
 void tinywl_panel_on_map(struct tinywl_panel *p,
                           struct tinywl_toplevel *toplevel);
 

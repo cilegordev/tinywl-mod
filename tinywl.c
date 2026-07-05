@@ -1018,6 +1018,23 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 	struct tinywl_output *output = wl_container_of(listener, output, request_state);
 	const struct wlr_output_event_request_state *event = data;
 	wlr_output_commit_state(output->wlr_output, event->state);
+
+	/*
+	 * The background and panel are sized/positioned against the output's
+	 * resolution once, at creation time. Without re-running that here,
+	 * resizing the host window afterwards (e.g. maximizing tinywl's
+	 * nested X11 backend window on top of Xfce) left the wallpaper and
+	 * taskbar pinned to the OLD, smaller size while the window itself
+	 * grew — leaving a cut-off black/empty area on the rest of the
+	 * screen.
+	 */
+	struct tinywl_server *server = output->server;
+	if (server->background) {
+		tinywl_background_resize(server->background, server);
+	}
+	if (server->panel) {
+		tinywl_panel_resize(server->panel, server);
+	}
 }
 
 static void output_destroy(struct wl_listener *listener, void *data) {

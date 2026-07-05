@@ -16,6 +16,8 @@ struct tinywl_background;
 
 struct tinywl_background *tinywl_background_create(struct tinywl_server *server);
 
+void tinywl_background_resize(struct tinywl_background *bg, struct tinywl_server *server);
+
 void tinywl_background_destroy(struct tinywl_background *bg);
 
 #ifdef __cplusplus

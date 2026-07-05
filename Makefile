@@ -48,11 +48,15 @@ clean:
 install: tinywl
 	cp tinywl /bin/tinywl
 	cp tinywl.desktop /usr/share/wayland-sessions/
+	cp cat.png /usr/share/pixmaps/
+	ln -s /usr/share/wayland-sessions/tinywl.desktop /usr/share/applications/
 	@echo "tinywl-mod installed!"
 
 uninstall:
-	rm -f /bin/tinywl
-	rm -f /usr/share/wayland-sessions/tinywl.desktop
+	rm -rf /bin/tinywl
+	rm -rf /usr/share/wayland-sessions/tinywl.desktop
+	rm -rf /usr/share/pixmaps/cat.png
+	rm -rf /usr/share/applications/tinywl.desktop
 	@echo "tinywl-mod uninstalled!"
 
 .DEFAULT_GOAL=tinywl

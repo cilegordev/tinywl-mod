@@ -803,6 +803,66 @@ void tinywl_panel_show(struct tinywl_panel *p)
     wlr_scene_node_set_enabled(&p->tree->node, true);
 }
 
+void tinywl_panel_resize(struct tinywl_panel *p, struct tinywl_server *server)
+{
+    if (!p) return;
+
+    /*
+     * Re-reads the current output's resolution and rebuilds everything
+     * that was sized against the OLD resolution at creation time: the
+     * background rect, the tree's position (panel sits at the bottom of
+     * the output), and the text-overlay shm buffer (clock/task labels),
+     * which is allocated at exactly out_w pixels wide. Without this, the
+     * panel stayed pinned to whatever size the output was when tinywl
+     * started, so resizing/maximizing a nested X11 backend window later
+     * left the taskbar only covering the original (smaller) width.
+     */
+    int new_w = 1920, new_h = 1080;
+    struct wlr_box out_box = {0};
+    if (!wl_list_empty(&server->outputs)) {
+        struct tinywl_output *out =
+            wl_container_of(server->outputs.next, out, link);
+        wlr_output_effective_resolution(out->wlr_output, &new_w, &new_h);
+        wlr_output_layout_get_box(server->output_layout, out->wlr_output, &out_box);
+    }
+
+    p->out_w = new_w;
+    p->out_h = new_h;
+    p->panel_y = p->out_h - PANEL_HEIGHT;
+
+    wlr_scene_node_set_position(&p->tree->node, out_box.x, out_box.y + p->panel_y);
+
+    if (p->bg_rect)
+        wlr_scene_rect_set_size(p->bg_rect, p->out_w, PANEL_HEIGHT);
+
+    /* Tear down the old text-overlay shm buffer/client — it was sized to
+     * the previous out_w — and rebuild it at the new width. */
+    if (p->text_buf) {
+        wlr_scene_node_destroy(&p->text_buf->node);
+        p->text_buf = NULL;
+    }
+    if (p->wl_buf)           { wl_buffer_destroy(p->wl_buf); p->wl_buf = NULL; }
+    if (p->shm_ctx.shm)      { wl_shm_destroy(p->shm_ctx.shm); }
+    if (p->shm_ctx.registry) { wl_registry_destroy(p->shm_ctx.registry); }
+    if (p->shm_ctx.display)  { wl_display_disconnect(p->shm_ctx.display); }
+    if (p->wl_client)        { wl_client_destroy(p->wl_client); p->wl_client = NULL; }
+    if (p->memdata)          { munmap(p->memdata, p->memsize); p->memdata = NULL; }
+    if (p->memfd >= 0)       { close(p->memfd); }
+    p->memfd = -1;
+    p->memsize = 0;
+    memset(&p->shm_ctx, 0, sizeof(p->shm_ctx));
+
+    struct wlr_buffer *wlr_buf = panel_shm_upload(p);
+    if (wlr_buf) {
+        panel_draw_text(p);
+        p->text_buf = wlr_scene_buffer_create(p->tree, wlr_buf);
+        wlr_buffer_unlock(wlr_buf);
+    }
+
+    panel_layout(p);
+    panel_redraw(p);
+}
+
 void tinywl_panel_destroy(struct tinywl_panel *p)
 {
     if (!p) return;
