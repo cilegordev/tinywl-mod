@@ -1254,6 +1254,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 			int y = out_box.y + (out_height - height) / 2;
 			wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
 		}
+		focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
 		return; /* Dialog done, don't process further */
 	}
 	
@@ -1485,13 +1486,36 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 
 	if (was_focused) {
 		struct tinywl_toplevel *next = NULL;
-		struct tinywl_toplevel *t;
-		wl_list_for_each(t, &server->toplevels, link) {
-			if (!t->minimized) {
-				next = t;
-				break;
+
+		/*
+		 * Prefer returning focus to this toplevel's actual parent (the
+		 * window that spawned it, e.g. a dialog closing back to the
+		 * xfce4-terminal that opened it) over just picking whichever
+		 * window happens to be first in the list — otherwise, with
+		 * several windows open, focus could land on an unrelated one
+		 * instead of where the user was actually working.
+		 */
+		struct wlr_xdg_toplevel *wlr_parent = toplevel->xdg_toplevel->parent;
+		if (wlr_parent) {
+			struct tinywl_toplevel *t;
+			wl_list_for_each(t, &server->toplevels, link) {
+				if (t->xdg_toplevel == wlr_parent && !t->minimized) {
+					next = t;
+					break;
+				}
 			}
 		}
+
+		if (!next) {
+			struct tinywl_toplevel *t;
+			wl_list_for_each(t, &server->toplevels, link) {
+				if (!t->minimized) {
+					next = t;
+					break;
+				}
+			}
+		}
+
 		if (next) {
 			focus_toplevel(next, next->xdg_toplevel->base->surface);
 		} else {
