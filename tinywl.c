@@ -700,6 +700,13 @@ static void process_cursor_resize(struct tinywl_server *server, uint32_t time) {
 	wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, new_width, new_height);
 }
 
+static void handle_pointer_grab_surface_destroy(struct wl_listener *listener, void *data) {
+	struct tinywl_server *server = wl_container_of(
+			listener, server, pointer_grab_surface_destroy);
+	wl_list_remove(&server->pointer_grab_surface_destroy.link);
+	server->pointer_grab_surface = NULL;
+}
+
 static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
 	/* Keep the drag-and-drop icon (if any) following the cursor. Cheap to
 	 * call even when no drag is active, since drag_icon has no children
@@ -720,6 +727,24 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
 	double sx, sy;
 	struct wlr_seat *seat = server->seat;
 	struct wlr_surface *surface = NULL;
+
+	if (server->pointer_button_count > 0 && server->pointer_grab_surface) {
+		/*
+		 * Implicit pointer grab: a button is held down, so keep sending
+		 * motion to the surface that had focus when it was pressed,
+		 * regardless of what's physically under the cursor right now.
+		 * Without this, dragging a text selection (or anything else
+		 * drag-based) past the edge of its window froze in place until
+		 * the cursor moved back inside — the moment nothing else was
+		 * under the cursor, pointer focus got cleared entirely below.
+		 */
+		surface = server->pointer_grab_surface;
+		sx = server->cursor->x - server->pointer_grab_offset_x;
+		sy = server->cursor->y - server->pointer_grab_offset_y;
+		wlr_seat_pointer_notify_motion(seat, time, sx, sy);
+		return;
+	}
+
 	struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
 			server->cursor->x, server->cursor->y, &surface, &sx, &sy);
 	if (!toplevel) {
@@ -961,6 +986,27 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	/* Notify the client with pointer focus that a button press has occurred */
 	wlr_seat_pointer_notify_button(server->seat,
 			event->time_msec, event->button, event->state);
+
+	if (event->state == WLR_BUTTON_PRESSED) {
+		if (server->pointer_button_count == 0 && surface) {
+			server->pointer_grab_surface = surface;
+			server->pointer_grab_offset_x = server->cursor->x - sx;
+			server->pointer_grab_offset_y = server->cursor->y - sy;
+			server->pointer_grab_surface_destroy.notify =
+				handle_pointer_grab_surface_destroy;
+			wl_signal_add(&surface->events.destroy,
+					&server->pointer_grab_surface_destroy);
+		}
+		server->pointer_button_count++;
+	} else if (event->state == WLR_BUTTON_RELEASED) {
+		if (server->pointer_button_count > 0) {
+			server->pointer_button_count--;
+		}
+		if (server->pointer_button_count == 0 && server->pointer_grab_surface) {
+			wl_list_remove(&server->pointer_grab_surface_destroy.link);
+			server->pointer_grab_surface = NULL;
+		}
+	}
 
 	if (event->state == WLR_BUTTON_RELEASED) {
 		/* If you released any buttons, we exit interactive move/resize mode. */

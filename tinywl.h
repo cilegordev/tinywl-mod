@@ -96,6 +96,19 @@ struct tinywl_server {
     struct wl_listener             request_start_drag;
     struct wl_listener             start_drag;
     struct wlr_scene_tree         *drag_icon;
+
+    /*
+     * Implicit pointer grab: while a button is held, motion keeps going
+     * to the surface that was focused when it was pressed, regardless of
+     * what's physically under the cursor now (needed for things like
+     * dragging a text selection past a window's edge). See
+     * process_cursor_motion() and server_cursor_button() in tinywl.c.
+     */
+    struct wlr_surface             *pointer_grab_surface;
+    double                          pointer_grab_offset_x, pointer_grab_offset_y;
+    int                             pointer_button_count;
+    struct wl_listener              pointer_grab_surface_destroy;
+
     struct wl_list                 keyboards;
     tinywl_cursor_mode             cursor_mode;
     struct tinywl_toplevel        *grabbed_toplevel;
