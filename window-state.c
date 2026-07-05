@@ -66,7 +66,7 @@ void save_window_state(struct tinywl_toplevel *toplevel) {
 	/* Get current geometry */
 	struct wlr_box geo;
 	wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
-	
+
 	int x = toplevel->scene_tree->node.x;
 	int y = toplevel->scene_tree->node.y;
 	int width = geo.width;
@@ -74,6 +74,21 @@ void save_window_state(struct tinywl_toplevel *toplevel) {
 	bool maximized = toplevel->maximized;
 	bool minimized = toplevel->minimized;
 	bool fullscreen = toplevel->fullscreen;
+
+	/*
+	 * This is called from xdg_toplevel_destroy(), which runs after the
+	 * surface has already been unmapped — at that point its geometry can
+	 * legitimately read back as 0x0 (no buffer/committed size left). If
+	 * we saved that, it would silently overwrite a previously valid,
+	 * meaningful saved size for this app_id with garbage, and the next
+	 * time this app_id maps (whether the same window or a differently
+	 * sized dialog sharing the same app_id) it would restore a bogus
+	 * 0x0 size at whatever (x, y) happened to be recorded. Skip saving
+	 * entirely rather than write a state that will never be useful.
+	 */
+	if (width <= 0 || height <= 0) {
+		return;
+	}
 	
 	const char *state_file = get_state_file_path();
 	

@@ -1106,8 +1106,49 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 		state_loaded = load_window_state(toplevel, toplevel->xdg_toplevel->app_id);
 	}
 
+	/*
+	 * Saved state is keyed by app_id alone. Short-lived dialogs (Save /
+	 * Overwrite / Delete confirmations, etc.) very often share the SAME
+	 * app_id as their application's main window — VS Code being a common
+	 * example — so without this check a tiny dialog would blindly inherit
+	 * the main window's last saved position/size, making it appear
+	 * wherever the main window happened to be (e.g. a corner of the
+	 * screen) instead of centered like a fresh dialog should be.
+	 */
+	if (state_loaded) {
+		if (toplevel->saved_geometry.width <= 0 || toplevel->saved_geometry.height <= 0) {
+			/*
+			 * A 0x0 saved size means nothing valid was ever actually
+			 * stored for this app_id (or the entry is otherwise
+			 * corrupt) — trusting its x,y position anyway is how a
+			 * dialog previously ended up pinned at (0,0) instead of
+			 * centered. Treat it as not loaded.
+			 */
+			state_loaded = false;
+		} else {
+			struct wlr_box current_geo;
+			wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &current_geo);
+
+			if (current_geo.width > 0 && current_geo.height > 0) {
+				int width_diff  = abs(current_geo.width  - toplevel->saved_geometry.width);
+				int height_diff = abs(current_geo.height - toplevel->saved_geometry.height);
+				bool size_matches_saved =
+					width_diff  <= toplevel->saved_geometry.width  / 4 &&
+					height_diff <= toplevel->saved_geometry.height / 4;
+
+				/* If the size we're about to restore doesn't reasonably
+				 * match what this surface is actually asking for right
+				 * now, treat it as not loaded so it falls through to
+				 * the normal "center new window" path below. */
+				if (!size_matches_saved) {
+					state_loaded = false;
+				}
+			}
+		}
+	}
+
 	struct tinywl_server *server = toplevel->server;
-	
+
 	/* Check if this is a dialog/modal window (has parent) */
 	toplevel->is_dialog = (toplevel->xdg_toplevel->parent != NULL);
 	toplevel->is_progress = false;
@@ -1372,7 +1413,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	/* Register this window in the taskbar */
 	tinywl_panel_on_map(server->panel, toplevel);
 	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
-	
+
 	/* If this is a dialog, ensure it stays on top of progress windows */
 	if (toplevel->is_dialog) {
 		raise_dialogs_to_front(server);
