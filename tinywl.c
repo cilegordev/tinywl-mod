@@ -1022,12 +1022,28 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 
 static void output_destroy(struct wl_listener *listener, void *data) {
 	struct tinywl_output *output = wl_container_of(listener, output, destroy);
+	struct tinywl_server *server = output->server;
 
 	wl_list_remove(&output->frame.link);
 	wl_list_remove(&output->request_state.link);
 	wl_list_remove(&output->destroy.link);
 	wl_list_remove(&output->link);
 	free(output);
+
+	/*
+	 * If that was the last output (e.g. tinywl is running nested as an
+	 * ordinary window on top of a host session and that window's close
+	 * button was clicked), there's nothing left to render to. Without
+	 * this, the compositor keeps running headless in the background —
+	 * still holding its Wayland socket, XWayland, and services alive —
+	 * so new apps that prefer Wayland when WAYLAND_DISPLAY is set end up
+	 * silently connecting to this now-invisible compositor instead of
+	 * the host session, instead of appearing on screen anywhere.
+	 */
+	if (wl_list_empty(&server->outputs)) {
+		wlr_log(WLR_INFO, "Last output destroyed, shutting down");
+		wl_display_terminate(server->wl_display);
+	}
 }
 
 static void server_new_output(struct wl_listener *listener, void *data) {

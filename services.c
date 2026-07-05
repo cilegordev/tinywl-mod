@@ -18,6 +18,36 @@
  * The WLR_USE_UNSTABLE guard is already defined via CFLAGS in the Makefile.
  */
 #include <wlr/xwayland.h>
+#include <wlr/backend.h>
+#include <wlr/backend/x11.h>
+#include <wlr/backend/multi.h>
+
+/*
+ * wlr_backend_autocreate() always wraps whatever it picks in a multi-backend
+ * (this has been true since wlroots' backend.c was rewritten years ago), so
+ * server->backend is never itself the X11 backend even when running nested
+ * inside an existing X11 session — it's the multi-backend container around
+ * it. wlr_backend_is_x11() on the container alone always returns false;
+ * we have to walk its children to find out.
+ */
+static void mark_if_x11(struct wlr_backend *backend, void *data) {
+    bool *found = data;
+    if (wlr_backend_is_x11(backend)) {
+        *found = true;
+    }
+}
+
+static bool backend_is_nested_x11(struct wlr_backend *backend) {
+    if (wlr_backend_is_x11(backend)) {
+        return true;
+    }
+    if (wlr_backend_is_multi(backend)) {
+        bool found = false;
+        wlr_multi_for_each_backend(backend, mark_if_x11, &found);
+        return found;
+    }
+    return false;
+}
 
 #include "tinywl.h"
 #include "services.h"
@@ -241,8 +271,14 @@ static void handle_xwayland_ready(struct wl_listener *listener, void *data) {
      * single-instance daemon on the shared D-Bus bus against the wrong
      * display, which then gets killed out from under that host session
      * when tinywl_services_destroy() runs.
+     *
+     * Also skipped entirely when nested inside an existing X11 session
+     * (see tinywl_services_init): xfsettingsd is single-instance over
+     * D-Bus regardless of which X display it's pointed at, so the host
+     * session's own instance would conflict with ours anyway.
      */
-    if (program_exists("xfsettingsd")) {
+    bool nested = backend_is_nested_x11(svc->server->backend);
+    if (!nested && program_exists("xfsettingsd")) {
         char *argv[] = { "xfsettingsd", NULL };
         pid_t pid = spawn_service("xfsettingsd", argv);
         if (pid > 0)
@@ -389,6 +425,28 @@ struct tinywl_services *tinywl_services_init(struct tinywl_server *server) {
     svc->server = server;
 
     /*
+     * If tinywl is running nested inside an existing X11 session (e.g.
+     * opened as an ordinary window on top of a running Xfce desktop, for
+     * testing), wlroots picks the X11 backend automatically because
+     * DISPLAY is already set (see wlr_backend_autocreate() in tinywl.c).
+     * In that case the host session (Xfce) already runs its own
+     * per-session singleton daemons — settings daemon, GVFS, a
+     * PolicyKit authentication agent, audio — and they're reachable on
+     * the same (reused) D-Bus session bus. Starting our own copies on
+     * top just duplicates them and, for anything that registers a
+     * single well-known D-Bus name (like the PolicyKit agent), causes
+     * outright errors ("An authentication agent already exists ...")
+     * instead of silently coexisting. Skip them entirely when nested.
+     */
+    bool nested = backend_is_nested_x11(server->backend);
+    if (nested) {
+        wlr_log(WLR_INFO,
+            "services: running nested inside an existing X11 session; "
+            "skipping settings daemon / GVFS / polkit agent / audio "
+            "daemon startup (host session already provides these)");
+    }
+
+    /*
      * 1. D-Bus session bus — must be first, everything else depends on it.
      */
     pid_t dbus_pid = start_dbus_session();
@@ -401,28 +459,33 @@ struct tinywl_services *tinywl_services_init(struct tinywl_server *server) {
      *    The ready signal fires asynchronously once the event loop runs.
      *    xfsettingsd is spawned from that same callback (handle_xwayland_ready),
      *    once DISPLAY definitely points at our own XWayland — not before.
+     *    Always needed, nested or not: it's what lets tinywl itself host
+     *    X11 clients, which the host session's own X server doesn't do
+     *    for us.
      */
     start_xwayland(svc);
 
-    /*
-     * 3. dconf — GSettings backend (apps query it on startup)
-     */
-    start_dconf(svc);
+    if (!nested) {
+        /*
+         * 3. dconf — GSettings backend (apps query it on startup)
+         */
+        start_dconf(svc);
 
-    /*
-     * 4. GVFS — virtual filesystem, needed for external drives / Trash
-     */
-    start_gvfs(svc);
+        /*
+         * 4. GVFS — virtual filesystem, needed for external drives / Trash
+         */
+        start_gvfs(svc);
 
-    /*
-     * 5. Polkit authentication agent
-     */
-    start_polkit(svc);
+        /*
+         * 5. Polkit authentication agent
+         */
+        start_polkit(svc);
 
-    /*
-     * 6. Audio daemon (PipeWire or PulseAudio)
-     */
-    start_audio(svc);
+        /*
+         * 6. Audio daemon (PipeWire or PulseAudio)
+         */
+        start_audio(svc);
+    }
 
     return svc;
 }
