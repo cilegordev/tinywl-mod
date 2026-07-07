@@ -95,8 +95,8 @@ void save_window_state(struct tinywl_toplevel *toplevel) {
 	/* Read existing states and update/add the entry */
 	FILE *f = fopen(state_file, "r");
 	FILE *temp = NULL;
-	char temp_path[512];
-	snprintf(temp_path, sizeof(temp_path), "%s.tmp", state_file);
+	char temp_path[520];
+	snprintf(temp_path, sizeof(temp_path), "%.512s.tmp", state_file);
 	temp = fopen(temp_path, "w");
 	
 	if (!temp) {
@@ -199,8 +199,8 @@ void remove_window_state(const char *app_id) {
 		return;
 	}
 	
-	char temp_path[512];
-	snprintf(temp_path, sizeof(temp_path), "%s.tmp", state_file);
+	char temp_path[520];
+	snprintf(temp_path, sizeof(temp_path), "%.512s.tmp", state_file);
 	FILE *temp = fopen(temp_path, "w");
 	
 	if (!temp) {

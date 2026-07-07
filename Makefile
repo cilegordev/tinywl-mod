@@ -45,18 +45,22 @@ clean:
 	rm -f tinywl xdg-shell-protocol.c xdg-shell-protocol.h debug.log
 	@echo "Done!"
 
+PREFIX ?= /usr
+BINDIR ?= $(PREFIX)/bin
+DATADIR ?= $(PREFIX)/share
+
 install: tinywl
-	cp tinywl /bin/tinywl
-	cp tinywl.desktop /usr/share/wayland-sessions/
-	cp cat.png /usr/share/pixmaps/
-	ln -s /usr/share/wayland-sessions/tinywl.desktop /usr/share/applications/
+	install -Dm755 tinywl $(DESTDIR)$(BINDIR)/tinywl
+	install -Dm644 tinywl.desktop $(DESTDIR)$(DATADIR)/wayland-sessions/tinywl.desktop
+	install -Dm644 tinywl.desktop $(DESTDIR)$(DATADIR)/applications/tinywl.desktop
+	install -Dm644 cat.png $(DESTDIR)$(DATADIR)/pixmaps/cat.png
 	@echo "tinywl-mod installed!"
 
 uninstall:
-	rm -rf /bin/tinywl
-	rm -rf /usr/share/wayland-sessions/tinywl.desktop
-	rm -rf /usr/share/pixmaps/cat.png
-	rm -rf /usr/share/applications/tinywl.desktop
+	rm -f $(DESTDIR)$(BINDIR)/tinywl
+	rm -f $(DESTDIR)$(DATADIR)/wayland-sessions/tinywl.desktop
+	rm -f $(DESTDIR)$(DATADIR)/applications/tinywl.desktop
+	rm -f $(DESTDIR)$(DATADIR)/pixmaps/cat.png
 	@echo "tinywl-mod uninstalled!"
 
 .DEFAULT_GOAL=tinywl

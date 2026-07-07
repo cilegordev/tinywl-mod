@@ -342,7 +342,10 @@ static void start_gvfs(struct tinywl_services *svc) {
             /* mkdir -p equivalent */
             char cmd[600];
             snprintf(cmd, sizeof(cmd), "mkdir -p '%s' 2>/dev/null", mntpath);
-            system(cmd);
+            if (system(cmd) != 0) {
+                /* Non-fatal: mount point may already exist or mkdir failed;
+                 * gvfsd-fuse spawn below will fail gracefully if so. */
+            }
 
             char *argv_fuse[] = { "gvfsd-fuse", mntpath, NULL };
             pid_t fpid = spawn_service("gvfsd-fuse", argv_fuse);

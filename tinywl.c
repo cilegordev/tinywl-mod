@@ -341,7 +341,8 @@ static void handle_print_key(void) {
 	 */
 	if (fork() == 0) {
 		/* Child process: exec xfce4-screenshooter */
-		execl("/usr/libexec/xfce4/screenshooter/scripts/xfce4-screenshooter", NULL);
+		execl("/usr/libexec/xfce4/screenshooter/scripts/xfce4-screenshooter",
+			"xfce4-screenshooter", (char *)NULL);
 		/* If exec fails, exit quietly */
 		exit(1);
 	}
@@ -728,7 +729,8 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
 	struct wlr_seat *seat = server->seat;
 	struct wlr_surface *surface = NULL;
 
-	if (server->pointer_button_count > 0 && server->pointer_grab_surface) {
+	if (server->pointer_button_count > 0 && server->pointer_grab_surface &&
+			!server->seat->drag) {
 		/*
 		 * Implicit pointer grab: a button is held down, so keep sending
 		 * motion to the surface that had focus when it was pressed,
@@ -737,6 +739,15 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
 		 * drag-based) past the edge of its window froze in place until
 		 * the cursor moved back inside — the moment nothing else was
 		 * under the cursor, pointer focus got cleared entirely below.
+		 *
+		 * This must NOT apply while a wl_data_device drag-and-drop is in
+		 * progress (server->seat->drag != NULL). During DnD, wlroots relies
+		 * on pointer focus actually following whatever surface is under the
+		 * cursor to fire drag-enter/motion/leave on the drop target. Locking
+		 * focus to the origin surface meant the target (e.g. dragging a file
+		 * from xarchiver onto Thunar, or vice versa) never received a
+		 * drag-enter, so it could never accept the drop — in either
+		 * direction, since both sides hit this same grab.
 		 */
 		surface = server->pointer_grab_surface;
 		sx = server->cursor->x - server->pointer_grab_offset_x;
@@ -1332,7 +1343,6 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 			
 			int width = geo_box.width;
 			int height = geo_box.height;
-			int panel_height = tinywl_panel_get_height(server->panel);
 			
 			/* Constrain size for progress window - much smaller */
 			int max_width = 500;

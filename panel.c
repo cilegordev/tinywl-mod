@@ -529,7 +529,7 @@ static void on_cursor_button(struct wl_listener *listener, void *data)
     struct wlr_pointer_button_event *ev = data;
 
     if (ev->button != BTN_LEFT ||
-        ev->state  != WL_POINTER_BUTTON_STATE_RELEASED)
+        ev->state  != WLR_BUTTON_RELEASED)
         return;
 
     int idx = panel_hit_task(p, p->server->cursor->x, p->server->cursor->y);
