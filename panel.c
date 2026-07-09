@@ -766,6 +766,13 @@ void tinywl_panel_raise_to_top(struct tinywl_panel *p)
     wlr_scene_node_raise_to_top(&p->tree->node);
 }
 
+void tinywl_panel_place_node_above(struct tinywl_panel *p,
+                                     struct wlr_scene_node *node)
+{
+    if (!p || !p->tree || !node) return;
+    wlr_scene_node_place_above(node, &p->tree->node);
+}
+
 void tinywl_panel_set_callbacks(struct tinywl_panel *p,
     void (*cb_minimize)(struct tinywl_toplevel *toplevel),
     void (*cb_restore)(struct tinywl_toplevel *toplevel))

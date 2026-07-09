@@ -98,6 +98,50 @@ static void popup_handle_destroy(struct wl_listener *listener, void *data) {
 	free(popup);
 }
 
+/*
+ * Walks up from `tree` until it finds the ancestor that is a direct child
+ * of the scene root - i.e. the same root-level node that panel->tree and
+ * every toplevel's own scene_tree are siblings of. Used to figure out
+ * which top-level scene node "owns" a popup, so that node (and therefore
+ * the popup nested inside it) can be raised above the panel.
+ */
+static struct wlr_scene_tree *scene_tree_root_child(
+		struct tinywl_server *server, struct wlr_scene_tree *tree) {
+	struct wlr_scene_tree *root = &server->scene->tree;
+	while (tree && tree->node.parent && tree->node.parent != root) {
+		tree = tree->node.parent;
+	}
+	if (tree && tree->node.parent == root) {
+		return tree;
+	}
+	return NULL;
+}
+
+/*
+ * Makes sure the popup's owning toplevel is stacked above the panel, so a
+ * context menu (e.g. from Thunar or xfce4-terminal) near the bottom of the
+ * screen isn't hidden behind it. The panel is a root-level sibling of every
+ * toplevel's own scene tree and gets raised to top on every focus change;
+ * a popup nested inside its parent toplevel's subtree can never out-rank
+ * the panel unless the whole subtree it lives in is placed above it.
+ * This only reorders the owning toplevel relative to the panel - it does
+ * not touch the popup's own position or its ordering relative to any
+ * other window.
+ */
+static void raise_popup_owner_above_panel(struct tinywl_popup *popup) {
+	struct wlr_xdg_surface *parent_surface =
+		wlr_xdg_surface_try_from_wlr_surface(popup->xdg_surface->popup->parent);
+	if (!parent_surface || !parent_surface->data) {
+		return;
+	}
+	struct wlr_scene_tree *parent_tree = parent_surface->data;
+	struct wlr_scene_tree *root_child =
+		scene_tree_root_child(popup->server, parent_tree);
+	if (root_child) {
+		tinywl_panel_place_node_above(popup->server->panel, &root_child->node);
+	}
+}
+
 static void apply_popup_constraint(struct tinywl_popup *popup) {
 	struct wlr_xdg_surface *xdg_surface = popup->xdg_surface;
 	struct wlr_xdg_popup *xdg_popup = xdg_surface->popup;
@@ -188,11 +232,21 @@ static void popup_handle_reposition(struct wl_listener *listener, void *data) {
 	    xdg_popup->current.geometry.y != popup->last_geom_y) {
 		apply_popup_constraint(popup);
 	}
+
+	/*
+	 * Re-assert the z-order fix on every commit (cheap - a single sibling
+	 * reorder), not just when the position changes. The panel can be
+	 * raised to top for unrelated reasons (e.g. another toplevel gaining
+	 * focus in a different part of the desktop) while this popup is still
+	 * open, which would otherwise drop it behind the panel again.
+	 */
+	raise_popup_owner_above_panel(popup);
 }
 
 static void popup_handle_map(struct wl_listener *listener, void *data) {
 	struct tinywl_popup *popup = wl_container_of(listener, popup, map);
 	apply_popup_constraint(popup);
+	raise_popup_owner_above_panel(popup);
 }
 
 static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface *surface) {
@@ -621,10 +675,18 @@ static struct tinywl_toplevel *desktop_toplevel_at(
 
 	*surface = scene_surface->surface;
 	/* Find the node corresponding to the tinywl_toplevel at the root of this
-	 * surface tree, it is the only one for which we set the data field. */
+	 * surface tree, it is the only one for which we set the data field.
+	 * Popups live under server->popup_layer (a root-level sibling with no
+	 * data of its own), so we also propagate the owning toplevel's data
+	 * pointer onto the popup's own tree at creation time (see
+	 * new_xdg_surface) - that lets this walk still resolve correctly
+	 * without needing to pass through the popup's original parent tree. */
 	struct wlr_scene_tree *tree = node->parent;
 	while (tree != NULL && tree->node.data == NULL) {
 		tree = tree->node.parent;
+	}
+	if (tree == NULL) {
+		return NULL;
 	}
 	return tree->node.data;
 }
