@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <sys/ioctl.h>
 #include <linux/vt.h>
 #include <linux/input-event-codes.h>
@@ -56,6 +57,30 @@ static int handle_term_signal(int signal_number, void *data) {
 	wlr_log(WLR_INFO, "Received signal %d, shutting down", signal_number);
 	wl_display_terminate(display);
 	return 0;
+}
+
+/*
+ * Reaps every process this compositor has fork()'d and forgotten about:
+ * the desktop-menu launcher menu.c's do_exec(),
+ * the screenshot helper, and the startup_cmd child. None of those call
+ * waitpid() themselves, so once the launched program exits it's left as a
+ * zombie ([name] <defunct> in ps) with this compositor as its PPID until
+ * something reaps it - which, without this handler, is never. Like
+ * handle_term_signal above, this goes through wl_event_loop_add_signal()
+ * (signalfd-backed) rather than a raw signal() handler, so it's safe to
+ * call ordinary (non-async-signal-safe) functions like waitpid() here.
+ * The WNOHANG loop drains every child that has already exited, since one
+ * SIGCHLD delivery can represent more than one dead child if several exit
+ * in quick succession.
+ */
+static int handle_sigchld(int signal_number, void *data) {
+	(void) signal_number;
+	(void) data;
+	pid_t pid;
+	while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) {
+		/* Reaped pid; nothing else to do. */
+	}
+	return 1;
 }
 
 /*
@@ -1942,6 +1967,19 @@ int main(int argc, char *argv[]) {
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	server.wl_display = wl_display_create();
+
+	/*
+	 * Register signal handling as early as possible, right after the
+	 * wl_display (and therefore its event loop) exists, and before
+	 * anything else in main() has a chance to fork() a child. See
+	 * handle_sigchld()'s comment above for why this matters: without it,
+	 * every launched program becomes a permanent zombie once it exits.
+	 */
+	struct wl_event_loop *term_loop = wl_display_get_event_loop(server.wl_display);
+	wl_event_loop_add_signal(term_loop, SIGINT, handle_term_signal, server.wl_display);
+	wl_event_loop_add_signal(term_loop, SIGTERM, handle_term_signal, server.wl_display);
+	wl_event_loop_add_signal(term_loop, SIGCHLD, handle_sigchld, NULL);
+
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
 	 * backend based on the current environment, such as opening an X11 window
@@ -2186,15 +2224,6 @@ int main(int argc, char *argv[]) {
 	 * frame events at the refresh rate, and so on. */
 	wlr_log(WLR_INFO, "Running Wayland compositor on WAYLAND_DISPLAY=%s",
 			socket);
-
-	/*
-	 * Route SIGINT/SIGTERM through the event loop so any way this session
-	 * ends still reaches the normal shutdown path below (and therefore
-	 * wl_display_destroy()'s socket cleanup) instead of dying immediately.
-	 */
-	struct wl_event_loop *term_loop = wl_display_get_event_loop(server.wl_display);
-	wl_event_loop_add_signal(term_loop, SIGINT, handle_term_signal, server.wl_display);
-	wl_event_loop_add_signal(term_loop, SIGTERM, handle_term_signal, server.wl_display);
 
 	wl_display_run(server.wl_display);
 
