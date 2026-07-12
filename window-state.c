@@ -1,8 +1,6 @@
 /*
- * window-state.c – Window state persistence for tinywl
- * 
- * Saves window state to ~/.config/tinywl/windows.state in format:
- * app_id|maximized|x|y|width|height|minimized|fullscreen
+ * window-state.c: persists window state to ~/.config/tinywl/windows.state as
+ * app_id|maximized|x|y|width|height|minimized|fullscreen.
  */
 
 #define _POSIX_C_SOURCE 200112L
@@ -75,17 +73,7 @@ void save_window_state(struct tinywl_toplevel *toplevel) {
 	bool minimized = toplevel->minimized;
 	bool fullscreen = toplevel->fullscreen;
 
-	/*
-	 * This is called from xdg_toplevel_destroy(), which runs after the
-	 * surface has already been unmapped — at that point its geometry can
-	 * legitimately read back as 0x0 (no buffer/committed size left). If
-	 * we saved that, it would silently overwrite a previously valid,
-	 * meaningful saved size for this app_id with garbage, and the next
-	 * time this app_id maps (whether the same window or a differently
-	 * sized dialog sharing the same app_id) it would restore a bogus
-	 * 0x0 size at whatever (x, y) happened to be recorded. Skip saving
-	 * entirely rather than write a state that will never be useful.
-	 */
+	/* Called after unmap, when geometry can legitimately read back as 0x0; skip saving rather than overwrite a valid saved size with garbage. */
 	if (width <= 0 || height <= 0) {
 		return;
 	}

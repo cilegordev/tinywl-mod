@@ -1,64 +1,7 @@
 /*
- * tinywl-panel.c  –  Weston-style taskbar panel for TinyWL
- *
- * Overview
- * --------
- * This module implements a bottom-anchored panel with two zones:
- *
- *   LEFT  → Taskbar: one button per open window (tinywl_toplevel).
- *            Clicking a button focuses / raises that window.
- *            The button for the currently focused window is highlighted.
- *            The button label is the window's XDG title (or app_id if no
- *            title is set, or "?" as a last-resort fallback).
- *
- *   RIGHT → Clock: date + time in the format "Sabtu, 16 Mei 2026  13:25",
- *            right-aligned, refreshed every 30 seconds.
- *
- * Why taskbar instead of static launchers?
- * -----------------------------------------
- * The compositor already has a right-click popup menu (menu.c) that launches
- * Terminal, File Manager and Browser.  Adding duplicate launcher buttons on
- * the panel would be redundant.  A live taskbar is both more useful and the
- * natural complement to the existing right-click menu.
- *
- * Architecture
- * ------------
- * The panel is rendered entirely inside the wlroots scene graph:
- *
- *   wlr_scene_tree  (panel->tree)
- *   ├── wlr_scene_rect   bg_rect        — dark semi-transparent bar
- *   ├── wlr_scene_rect   task_rects[]   — per-window highlight rects
- *   ├── wlr_scene_rect   sep_rects[]    — separator lines between buttons
- *   └── wlr_scene_buffer text_buf       — Cairo text overlay (titles + clock)
- *
- * The text buffer is a single ARGB32 Cairo surface uploaded through wl_shm
- * (same non-blocking socketpair technique as menu.c / background.c).
- * Whenever the taskbar changes (window open/close/rename, focus change, clock
- * tick) only the Cairo surface is repainted and wlr_scene_buffer_set_buffer()
- * is called — no scene-tree surgery required.
- *
- * Integration with tinywl.c
- * -------------------------
- * tinywl.c must call three hooks so the panel stays in sync:
- *
- *   tinywl_panel_on_map(panel, toplevel)    — when a new window is mapped
- *   tinywl_panel_on_unmap(panel, toplevel)  — when a window is unmapped
- *   tinywl_panel_on_focus(panel, toplevel)  — when focus changes (NULL = none)
- *
- * Called from xdg_toplevel_map(), xdg_toplevel_unmap(), and focus_toplevel().
- *
- * Clock format
- * ------------
- * strftime format : "%A, %d %B %Y  %H:%M"
- * Example output  : "Saturday, 16 May 2026  13:25"
- * Day/month names come from LC_TIME in the process environment.
- *
- * Copyright
- * ---------
- * Independent implementation for wlroots / TinyWL.
- * Design reference: Weston desktop-shell (clients/desktop-shell.c),
- * © Kristian Høgsberg and Collabora Ltd., MIT licence.
- * No Weston source text was copied.
+ * panel.c: Weston-style bottom taskbar. Left zone lists open windows (click to focus/raise, highlighted when focused);
+ * right zone shows a live clock. Rendered via the scene graph plus a Cairo text overlay uploaded through wl_shm.
+ * tinywl.c calls tinywl_panel_on_map/on_unmap/on_focus to keep it in sync.
  */
 
 #define _GNU_SOURCE
@@ -228,13 +171,7 @@ struct tinywl_panel {
     struct panel_task        tasks[MAX_TASKS];
     int                      n_tasks;
 
-    /*
-     * order[slot] = index into tasks[] that currently occupies visual
-     * slot `slot` (0 = leftmost). Reordering the taskbar via drag only
-     * ever permutes this array — the tasks[] entries themselves (and
-     * their wl_listeners) never move, which sidesteps the stale-listener
-     * hazard documented in tinywl_panel_on_unmap().
-     */
+    /* order[slot] maps a visual slot to its tasks[] index; drag-reorder only permutes this array, tasks[] entries never move. */
     int                      order[MAX_TASKS];
 
     struct tinywl_toplevel  *focused;
@@ -246,19 +183,7 @@ struct tinywl_panel {
     int                      drag_slot;      /* current visual slot of the dragged task */
     double                   drag_start_x;   /* cursor x at press, for threshold check */
 
-    /* Calendar tooltip, opened by clicking the clock area (click again,
-     * or click anywhere else, to close it).
-     *
-     * clock_hit_x/clock_hit_w is the *exact* click target — the clock
-     * text's own bounding box (plus a small padding margin) — computed
-     * fresh in panel_draw_text() every time the clock string is redrawn,
-     * since its width changes with the text (e.g. locale, AM/PM, date
-     * length). This deliberately does NOT reuse CLOCK_AREA_W, which is
-     * just the wider layout reservation that keeps taskbar buttons from
-     * overlapping the clock — using that for hit-testing was the bug:
-     * clicking empty panel space well before the actual date text still
-     * opened the popup.
-     */
+    /* Calendar tooltip toggled by clicking the clock; clock_hit_x/w is the clock text's own bounding box, recomputed in panel_draw_text(), not the wider CLOCK_AREA_W layout reservation. */
     bool                     calendar_open;
     int                      clock_hit_x;
     int                      clock_hit_w;
@@ -275,11 +200,7 @@ struct tinywl_panel {
     struct wl_listener       cursor_motion;
     struct wl_event_source  *clock_timer;
 
-    /*
-     * Callbacks into tinywl.c for minimize / restore.
-     * Set by tinywl_panel_set_callbacks() after panel creation.
-     * This avoids a circular dependency between panel.c and tinywl.c.
-     */
+    /* Callbacks into tinywl.c for minimize/restore, set by tinywl_panel_set_callbacks() to avoid a circular dependency. */
     void (*cb_minimize)(struct tinywl_toplevel *toplevel);
     void (*cb_restore)(struct tinywl_toplevel *toplevel);
 };
@@ -436,10 +357,7 @@ static void panel_draw_text(struct tinywl_panel *p)
     double cx = (double)(p->out_w - PANEL_SPACING * 2) - ext.width;
     double cy = PANEL_HEIGHT / 2.0 - 1.0 + ext.height / 2.0;
 
-    /* Exact click target for the calendar popup — the text's own
-     * bounding box plus a small padding margin, NOT the wider
-     * CLOCK_AREA_W layout reservation. See the field comment on
-     * clock_hit_x/clock_hit_w. */
+    /* Exact click target for the calendar popup: the clock text's own bounding box, not the wider CLOCK_AREA_W reservation. */
     {
         const int pad = 8;
         int hit_x = (int)cx - pad;
@@ -569,13 +487,7 @@ static struct wlr_buffer *panel_shm_upload(struct tinywl_panel *p)
     return wlr_buf;
 }
 
-/* Calendar tooltip shm upload
- *
- * Reuses the wl_client/wl_shm connection already established by
- * panel_shm_upload() for the main text overlay — only a second,
- * fixed-size buffer is created here, since the tooltip's dimensions
- * never depend on the output width.
- */
+/* Calendar tooltip shm upload reuses the wl_client/wl_shm connection from panel_shm_upload(), with its own fixed-size buffer. */
 static struct wlr_buffer *panel_calendar_shm_upload(struct tinywl_panel *p)
 {
     if (!p->shm_ctx.shm || !p->wl_client) return NULL;
@@ -828,11 +740,7 @@ static int panel_hit_task(struct tinywl_panel *p, double ox, double oy)
     return -1;
 }
 
-/* True when (ox, oy), in output-local coordinates, falls over the clock
- * text itself — its exact bounding box (clock_hit_x/clock_hit_w, kept
- * up to date by panel_draw_text()), not the wider CLOCK_AREA_W layout
- * reservation. Clicking empty panel space near the clock must NOT open
- * the calendar popup; only the date/time text itself should. */
+/* True when (ox, oy) falls over the clock text's exact bounding box, not the wider CLOCK_AREA_W reservation. */
 static bool panel_hit_clock(struct tinywl_panel *p, double ox, double oy)
 {
     int py = (int)oy - p->panel_y;
@@ -842,13 +750,7 @@ static bool panel_hit_clock(struct tinywl_panel *p, double ox, double oy)
     return px >= p->clock_hit_x && px < p->clock_hit_x + p->clock_hit_w;
 }
 
-/* Taskbar drag-to-reorder helpers
- * -------------------------------
- * Reordering only ever permutes p->order[] (which physical tasks[] entry
- * occupies which visual slot). The tasks[] entries and their wl_listeners
- * never move, so none of the stale-listener hazards that on_unmap has to
- * work around apply here — this is plain integer bookkeeping.
- */
+/* Taskbar drag-to-reorder only permutes p->order[]; the tasks[] entries and their listeners never move. */
 
 /* Visual slot currently occupied by physical task index `real`, or -1. */
 static int panel_slot_for_real(struct tinywl_panel *p, int real)
@@ -891,11 +793,7 @@ static void panel_move_order(struct tinywl_panel *p, int from, int to)
     p->order[to] = moved;
 }
 
-/* Keeps order[] consistent with the physical compaction that
- * tinywl_panel_on_unmap() performs: drops the slot that referenced the
- * removed physical index, and shifts down every remaining reference to a
- * physical index above it (since that's exactly how the compaction moved
- * things). `old_n_tasks` is p->n_tasks *before* the caller decremented it. */
+/* Keeps order[] consistent with on_unmap()'s physical compaction: drop the removed slot, shift down references above it. */
 static void panel_order_remove_physical(struct tinywl_panel *p,
                                           int removed_phys, int old_n_tasks)
 {
@@ -947,12 +845,7 @@ static void on_cursor_button(struct wl_listener *listener, void *data)
     if (ev->button != BTN_LEFT) return;
 
     if (ev->state == WLR_BUTTON_PRESSED) {
-        /*
-         * Arm a potential drag. Nothing else happens yet — whether this
-         * turns into a reorder (drag_active, decided in on_cursor_motion
-         * once the cursor travels past DRAG_THRESHOLD_PX) or a plain click
-         * (handled below on release) is still undecided at press time.
-         */
+        /* Arm a potential drag; whether it becomes a reorder or a plain click is decided later (DRAG_THRESHOLD_PX / release). */
         int idx = panel_hit_task(p, p->server->cursor->x, p->server->cursor->y);
         int slot = (idx >= 0) ? panel_slot_for_real(p, idx) : -1;
         p->drag_pending = (slot >= 0);
@@ -994,17 +887,10 @@ static void on_cursor_button(struct wl_listener *listener, void *data)
     if (!tl) return;
 
     if (tl->minimized) {
-        /*
-         * Window is minimized — restore it: re-enable scene node, raise,
-         * and focus.  Calls back into tinywl.c via the function pointer
-         * stored in the panel (restore_toplevel).
-         */
+        /* Minimized window: restore it (re-enable scene node, raise, focus) via the callback stored in the panel. */
         tinywl_panel_restore_toplevel(p, tl);
     } else if (tl == p->focused) {
-        /*
-         * Clicking the taskbar button of the already-focused window
-         * minimizes it (toggle behaviour, matching common desktop UX).
-         */
+        /* Clicking the already-focused window's taskbar button minimizes it (toggle behaviour). */
         tinywl_panel_minimize_toplevel(p, tl);
     } else {
         /* Raise and focus the non-minimized window */
@@ -1171,20 +1057,8 @@ void tinywl_panel_on_unmap(struct tinywl_panel *p, struct tinywl_toplevel *tople
     wl_list_init(&p->tasks[found].destroy.link);
 
     /*
-     * Shift the remaining tasks down WITHOUT copying live wl_listener
-     * structs by value. `p->tasks[i] = p->tasks[i + 1]` looks harmless but
-     * a struct assignment copies the wl_listener's `link` pointer values
-     * as raw bytes; the wl_signal that owns that listener (embedded in
-     * the corresponding xdg_toplevel, untouched by this code) keeps
-     * pointing at the OLD slot's address, not the new one. Any later
-     * event on that signal — including the memset() that used to run on
-     * the vacated last slot right after this loop — then reads/writes a
-     * listener_list node through a stale address, corrupting the list
-     * (or zeroing a still-referenced `notify` pointer) and eventually
-     * crashing with a jump through a garbage/NULL function pointer.
-     *
-     * Instead, explicitly unregister each shifted task's listeners from
-     * their old address and re-register them at the new one.
+     * Shift remaining tasks down by unregistering/re-registering each wl_listener at its new address, rather than copying
+     * the struct by value, since copying leaves the owning wl_signal pointing at the old (stale) address.
      */
     for (int i = found; i < p->n_tasks - 1; i++) {
         struct tinywl_toplevel *moved_toplevel = p->tasks[i + 1].toplevel;
@@ -1299,16 +1173,7 @@ void tinywl_panel_resize(struct tinywl_panel *p, struct tinywl_server *server)
 {
     if (!p) return;
 
-    /*
-     * Re-reads the current output's resolution and rebuilds everything
-     * that was sized against the OLD resolution at creation time: the
-     * background rect, the tree's position (panel sits at the bottom of
-     * the output), and the text-overlay shm buffer (clock/task labels),
-     * which is allocated at exactly out_w pixels wide. Without this, the
-     * panel stayed pinned to whatever size the output was when tinywl
-     * started, so resizing/maximizing a nested X11 backend window later
-     * left the taskbar only covering the original (smaller) width.
-     */
+    /* Rebuild everything sized against the output resolution at creation time (background rect, tree position, text overlay buffer) after a resize. */
     int new_w = 1920, new_h = 1080;
     struct wlr_box out_box = {0};
     if (!wl_list_empty(&server->outputs)) {

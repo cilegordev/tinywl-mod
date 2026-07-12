@@ -1,12 +1,4 @@
-/*
- * tinywl.h – Struct definitions for tinywl_server and related types.
- *
- * This header is self-contained: it includes all wlr headers needed
- * so that struct tinywl_server can be parsed anywhere.
- *
- * Both tinywl.c and menu.c include this header.
- * tinywl.c no longer defines these structs directly.
- */
+/* tinywl.h: struct definitions for tinywl_server and related types. */
 
 #ifndef TINYWL_H
 #define TINYWL_H
@@ -37,11 +29,7 @@
 #include <wlr/util/log.h>
 #include <wlr/util/box.h>
 
-/*
- * XWayland support (wlroots 0.17 built with xwayland).
- * Guard with TINYWL_HAS_XWAYLAND so the Makefile can disable it if the
- * installed wlroots was built without xwayland support.
- */
+/* XWayland support (wlroots 0.17 built with xwayland); TINYWL_HAS_XWAYLAND lets the Makefile disable it. */
 #ifndef TINYWL_NO_XWAYLAND
 #include <wlr/xwayland.h>
 #define TINYWL_HAS_XWAYLAND 1
@@ -66,11 +54,7 @@ typedef enum tinywl_cursor_mode {
     TINYWL_CURSOR_RESIZE,
 } tinywl_cursor_mode;
 
-/*
- * Edge-snap ("split screen") zone. Detected from cursor position while
- * interactively moving a window (see process_cursor_move() in tinywl.c);
- * TINYWL_SNAP_NONE means "not near an edge, move normally".
- */
+/* Edge-snap ("split screen") zone, detected from cursor position while moving a window; TINYWL_SNAP_NONE means not near an edge. */
 typedef enum tinywl_snap_zone {
     TINYWL_SNAP_NONE,
     TINYWL_SNAP_LEFT,
@@ -109,13 +93,7 @@ struct tinywl_server {
     struct wl_listener             start_drag;
     struct wlr_scene_tree         *drag_icon;
 
-    /*
-     * Implicit pointer grab: while a button is held, motion keeps going
-     * to the surface that was focused when it was pressed, regardless of
-     * what's physically under the cursor now (needed for things like
-     * dragging a text selection past a window's edge). See
-     * process_cursor_motion() and server_cursor_button() in tinywl.c.
-     */
+    /* Implicit pointer grab: while a button is held, motion keeps going to the surface focused when it was pressed, regardless of what's under the cursor now. */
     struct wlr_surface             *pointer_grab_surface;
     double                          pointer_grab_offset_x, pointer_grab_offset_y;
     int                             pointer_button_count;
@@ -128,15 +106,7 @@ struct tinywl_server {
     struct wlr_box                 grab_geobox;
     uint32_t                       resize_edges;
 
-    /*
-     * Edge-snap ("split screen") preview shown while interactively moving
-     * a window near a screen edge. snap_pending is recomputed on every
-     * cursor motion during a move (TINYWL_SNAP_NONE when not near an
-     * edge); snap_preview is the translucent rect that previews where
-     * the window will land, created once and toggled/repositioned as
-     * needed. See process_cursor_move() and reset_cursor_mode() in
-     * tinywl.c.
-     */
+    /* Edge-snap preview shown while moving a window near a screen edge; snap_pending is recomputed each motion, snap_preview is the translucent rect. */
     tinywl_snap_zone                snap_pending;
     struct wlr_scene_rect          *snap_preview;
 
@@ -155,10 +125,7 @@ struct tinywl_server {
     /* Bottom taskbar panel (Weston-style) */
     struct tinywl_panel           *panel;
 
-    /*
-     * wlr_compositor is stored so services.c can pass it to
-     * wlr_xwayland_create().
-     */
+    /* wlr_compositor is stored so services.c can pass it to wlr_xwayland_create(). */
     struct wlr_compositor         *compositor;
 
     /* Background services: D-Bus, XWayland, GVFS, Polkit, audio */
@@ -192,12 +159,7 @@ struct tinywl_toplevel {
     bool            maximized;
     struct wlr_box  saved_geometry; /* x,y,width,height before maximize */
 
-    /*
-     * Edge-snap ("split screen") state. A snapped window shares
-     * saved_geometry with maximize for its "restore to this" size/pos —
-     * a window is only ever snapped OR maximized, never both, so reusing
-     * that field avoids a redundant second saved-geometry box.
-     */
+    /* Edge-snap state; shares saved_geometry with maximize since a window is only ever snapped or maximized, never both. */
     bool             snapped;
     tinywl_snap_zone snapped_zone;
 

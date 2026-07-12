@@ -18,11 +18,6 @@
 #include <linux/input-event-codes.h>
 #include <xkbcommon/xkbcommon.h>
 
-/*
- * tinywl.h includes all wlr headers and defines
- * struct tinywl_server, tinywl_output, tinywl_toplevel, tinywl_keyboard,
- * and enum tinywl_cursor_mode.
- */
 #include "tinywl.h"
 #include "menu.h"
 #include "background.h"
@@ -37,21 +32,7 @@ void restore_toplevel(struct tinywl_toplevel *toplevel);
 /* Forward declaration for dialog stacking */
 static void raise_dialogs_to_front(struct tinywl_server *server);
 
-/*
- * Handles SIGINT/SIGTERM so that however this session ends — killed by a
- * display manager on logout, Ctrl+C from a terminal, VT switch teardown,
- * etc. — we always go through the normal wl_display_run() return path
- * instead of dying immediately. Skipping that path skips wl_display_destroy(),
- * which is what unlinks our Wayland socket/lock files under
- * $XDG_RUNTIME_DIR; a leftover socket file there is enough to make other
- * tools (e.g. neofetch) misdetect a Wayland session as still active long
- * after tinywl has exited, until the next reboot clears the tmpfs.
- *
- * wl_event_loop_add_signal() is the wlroots/wayland-server safe way to
- * handle POSIX signals (backed by signalfd, delivered on the event loop
- * rather than a raw async-signal-context handler), so it's safe to call
- * wl_display_terminate() directly here.
- */
+/* Handle SIGINT/SIGTERM by calling wl_display_terminate() so wl_display_destroy() runs and cleans up the Wayland socket files. */
 static int handle_term_signal(int signal_number, void *data) {
 	struct wl_display *display = data;
 	wlr_log(WLR_INFO, "Received signal %d, shutting down", signal_number);
@@ -59,20 +40,7 @@ static int handle_term_signal(int signal_number, void *data) {
 	return 0;
 }
 
-/*
- * Reaps every process this compositor has fork()'d and forgotten about:
- * the desktop-menu launcher menu.c's do_exec(),
- * the screenshot helper, and the startup_cmd child. None of those call
- * waitpid() themselves, so once the launched program exits it's left as a
- * zombie ([name] <defunct> in ps) with this compositor as its PPID until
- * something reaps it - which, without this handler, is never. Like
- * handle_term_signal above, this goes through wl_event_loop_add_signal()
- * (signalfd-backed) rather than a raw signal() handler, so it's safe to
- * call ordinary (non-async-signal-safe) functions like waitpid() here.
- * The WNOHANG loop drains every child that has already exited, since one
- * SIGCHLD delivery can represent more than one dead child if several exit
- * in quick succession.
- */
+/* Reap zombie children left behind by forked helpers (menu launcher, screenshot tool, startup_cmd). */
 static int handle_sigchld(int signal_number, void *data) {
 	(void) signal_number;
 	(void) data;
@@ -83,14 +51,7 @@ static int handle_sigchld(int signal_number, void *data) {
 	return 1;
 }
 
-/*
- * Belt-and-suspenders cleanup: registered with atexit() right after the
- * socket is created, so it runs no matter which return/exit path this
- * process takes (including the various early "return 1" error branches
- * in main(), not just the normal fallthrough at the end). Removing files
- * that don't exist is harmless (unlink() just fails silently), so it's
- * safe to always attempt both.
- */
+/* Registered with atexit() so the socket/lock files are removed on any exit path. */
 static char wayland_socket_path[PATH_MAX];
 static char wayland_lock_path[PATH_MAX];
 
@@ -123,13 +84,7 @@ static void popup_handle_destroy(struct wl_listener *listener, void *data) {
 	free(popup);
 }
 
-/*
- * Walks up from `tree` until it finds the ancestor that is a direct child
- * of the scene root - i.e. the same root-level node that panel->tree and
- * every toplevel's own scene_tree are siblings of. Used to figure out
- * which top-level scene node "owns" a popup, so that node (and therefore
- * the popup nested inside it) can be raised above the panel.
- */
+/* Walk up to the root-level ancestor scene node that owns `tree`. */
 static struct wlr_scene_tree *scene_tree_root_child(
 		struct tinywl_server *server, struct wlr_scene_tree *tree) {
 	struct wlr_scene_tree *root = &server->scene->tree;
@@ -142,17 +97,7 @@ static struct wlr_scene_tree *scene_tree_root_child(
 	return NULL;
 }
 
-/*
- * Makes sure the popup's owning toplevel is stacked above the panel, so a
- * context menu (e.g. from Thunar or xfce4-terminal) near the bottom of the
- * screen isn't hidden behind it. The panel is a root-level sibling of every
- * toplevel's own scene tree and gets raised to top on every focus change;
- * a popup nested inside its parent toplevel's subtree can never out-rank
- * the panel unless the whole subtree it lives in is placed above it.
- * This only reorders the owning toplevel relative to the panel - it does
- * not touch the popup's own position or its ordering relative to any
- * other window.
- */
+/* Raise a popup's owning toplevel above the panel so context menus near the bottom of the screen aren't hidden behind it. */
 static void raise_popup_owner_above_panel(struct tinywl_popup *popup) {
 	struct wlr_xdg_surface *parent_surface =
 		wlr_xdg_surface_try_from_wlr_surface(popup->xdg_surface->popup->parent);
@@ -258,13 +203,7 @@ static void popup_handle_reposition(struct wl_listener *listener, void *data) {
 		apply_popup_constraint(popup);
 	}
 
-	/*
-	 * Re-assert the z-order fix on every commit (cheap - a single sibling
-	 * reorder), not just when the position changes. The panel can be
-	 * raised to top for unrelated reasons (e.g. another toplevel gaining
-	 * focus in a different part of the desktop) while this popup is still
-	 * open, which would otherwise drop it behind the panel again.
-	 */
+	/* Re-assert the panel z-order fix on every commit, since the panel can be raised again while the popup stays open. */
 	raise_popup_owner_above_panel(popup);
 }
 
@@ -287,11 +226,7 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface 
 		return;
 	}
 	if (prev_surface) {
-		/*
-		 * Deactivate the previously focused surface. This lets the client know
-		 * it no longer has focus and the client will repaint accordingly, e.g.
-		 * stop displaying a caret.
-		 */
+		/* Deactivate the previously focused surface so the client repaints without focus. */
 		struct wlr_xdg_toplevel *prev_toplevel =
 			wlr_xdg_toplevel_try_from_wlr_surface(prev_surface);
 		if (prev_toplevel != NULL) {
@@ -322,11 +257,7 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface 
 	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
 	/* Update the taskbar highlight to reflect the newly focused window */
 	tinywl_panel_on_focus(server->panel, toplevel);
-	/*
-	 * Tell the seat to have the keyboard enter this surface. wlroots will keep
-	 * track of this and automatically send key events to the appropriate
-	 * clients without additional work on your part.
-	 */
+	/* Give the surface keyboard focus through the seat. */
 	if (keyboard != NULL) {
 		wlr_seat_keyboard_notify_enter(seat, toplevel->xdg_toplevel->base->surface,
 			keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
@@ -339,12 +270,7 @@ static void keyboard_handle_modifiers(
 	 * pressed. We simply communicate this to the client. */
 	struct tinywl_keyboard *keyboard =
 		wl_container_of(listener, keyboard, modifiers);
-	/*
-	 * A seat can only have one keyboard, but this is a limitation of the
-	 * Wayland protocol - not wlroots. We assign all connected keyboards to the
-	 * same seat. You can swap out the underlying wlr_keyboard like this and
-	 * wlr_seat handles this transparently.
-	 */
+	/* A seat has only one keyboard slot; swap the underlying wlr_keyboard as devices change. */
 	wlr_seat_set_keyboard(keyboard->server->seat, keyboard->wlr_keyboard);
 	/* Send modifiers to the client. */
 	wlr_seat_keyboard_notify_modifiers(keyboard->server->seat,
@@ -352,10 +278,7 @@ static void keyboard_handle_modifiers(
 }
 
 static void handle_vt_switch(struct tinywl_server *server, int vt_number) {
-	/*
-	 * Switch to a specific virtual terminal (TTY) using ioctl.
-	 * VT numbers are 1-8, maps to F1-F8 keys.
-	 */
+	/* Switch VT via ioctl (VT numbers 1-8 map to F1-F8). */
 	int fd = -1;
 	
 	/* Method 1: Try /dev/tty0 (the virtual console multiplexer) */
@@ -387,13 +310,7 @@ static void handle_vt_switch(struct tinywl_server *server, int vt_number) {
 }
 
 static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
-	/*
-	 * Here we handle compositor keybindings. This is when the compositor is
-	 * processing keys, rather than passing them on to the client for its own
-	 * processing.
-	 *
-	 * This function assumes Alt is held down.
-	 */
+	/* Compositor keybindings, handled while Alt is held. */
 	switch (sym) {
 	case XKB_KEY_Escape:
 		wl_display_terminate(server->wl_display);
@@ -414,10 +331,7 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 }
 
 static void handle_print_key(void) {
-	/*
-	 * Handle Print key to launch xfce4-screenshooter.
-	 * Fork and exec to avoid blocking the compositor.
-	 */
+	/* Print key: launch xfce4-screenshooter via fork/exec. */
 	if (fork() == 0) {
 		/* Child process: exec xfce4-screenshooter */
 		execl("/usr/libexec/xfce4/screenshooter/scripts/xfce4-screenshooter",
@@ -517,10 +431,7 @@ static void keyboard_handle_key(
 }
 
 static void keyboard_handle_destroy(struct wl_listener *listener, void *data) {
-	/* This event is raised by the keyboard base wlr_input_device to signal
-	 * the destruction of the wlr_keyboard. It will no longer receive events
-	 * and should be destroyed.
-	 */
+	/* wlr_keyboard is being destroyed. */
 	struct tinywl_keyboard *keyboard =
 		wl_container_of(listener, keyboard, destroy);
 	wl_list_remove(&keyboard->modifiers.link);
@@ -565,10 +476,7 @@ static void server_new_keyboard(struct tinywl_server *server,
 
 static void server_new_pointer(struct tinywl_server *server,
 		struct wlr_input_device *device) {
-	/* We don't do anything special with pointers. All of our pointer handling
-	 * is proxied through wlr_cursor. On another compositor, you might take this
-	 * opportunity to do libinput configuration on the device to set
-	 * acceleration, etc. */
+	/* Pointer handling is proxied through wlr_cursor. */
 	wlr_cursor_attach_input_device(server->cursor, device);
 }
 
@@ -608,20 +516,14 @@ static void seat_request_cursor(struct wl_listener *listener, void *data) {
 	/* This can be sent by any client, so we check to make sure this one is
 	 * actually has pointer focus first. */
 	if (focused_client == event->seat_client) {
-		/* Once we've vetted the client, we can tell the cursor to use the
-		 * provided surface as the cursor image. It will set the hardware cursor
-		 * on the output that it's currently on and continue to do so as the
-		 * cursor moves between outputs. */
+		/* Set the hardware cursor image from the client-provided surface. */
 		wlr_cursor_set_surface(server->cursor, event->surface,
 				event->hotspot_x, event->hotspot_y);
 	}
 }
 
 static void seat_request_set_selection(struct wl_listener *listener, void *data) {
-	/* This event is raised by the seat when a client wants to set the selection,
-	 * usually when the user copies something. wlroots allows compositors to
-	 * ignore such requests if they so choose, but in tinywl we always honor
-	 */
+	/* Honor the client's selection (clipboard) request. */
 	struct tinywl_server *server = wl_container_of(
 			listener, server, request_set_selection);
 	struct wlr_seat_request_set_selection_event *event = data;
@@ -649,14 +551,7 @@ static void seat_request_start_drag(struct wl_listener *listener, void *data) {
 }
 
 static void seat_start_drag(struct wl_listener *listener, void *data) {
-       /*
-        * Fired once wlr_seat_start_pointer_drag() actually begins the drag
-        * (as opposed to request_start_drag above, which only asks for one).
-        * If the client attached an icon surface, put it in the scene graph
-        * so it's actually visible following the cursor — otherwise the
-        * drag works (data still transfers on drop) but nothing is drawn,
-        * which is what made it look like there was no drag feedback at all.
-        */
+       /* Put the drag icon in the scene graph once the drag actually starts. */
        struct tinywl_server *server = wl_container_of(
                        listener, server, start_drag);
        struct wlr_drag *drag = data;
@@ -667,14 +562,7 @@ static void seat_start_drag(struct wl_listener *listener, void *data) {
 
        wlr_scene_drag_icon_create(server->drag_icon, drag->icon);
 
-       /*
-        * The drag_icon tree was created once at startup, before any
-        * background/panel/toplevel/menu nodes existed, so it normally
-        * sits at the very bottom of the scene's stacking order — hidden
-        * behind everything else. Raise it to the top of its parent's
-        * children every time a drag actually starts so it renders above
-        * whatever is currently on screen.
-        */
+       /* Raise the drag icon to the top so it renders above everything else. */
        wlr_scene_node_raise_to_top(&server->drag_icon->node);
        wlr_scene_node_set_position(&server->drag_icon->node,
                        server->cursor->x, server->cursor->y);
@@ -699,13 +587,7 @@ static struct tinywl_toplevel *desktop_toplevel_at(
 	}
 
 	*surface = scene_surface->surface;
-	/* Find the node corresponding to the tinywl_toplevel at the root of this
-	 * surface tree, it is the only one for which we set the data field.
-	 * Popups live under server->popup_layer (a root-level sibling with no
-	 * data of its own), so we also propagate the owning toplevel's data
-	 * pointer onto the popup's own tree at creation time (see
-	 * new_xdg_surface) - that lets this walk still resolve correctly
-	 * without needing to pass through the popup's original parent tree. */
+	/* Walk up to the scene node holding the owning toplevel's data pointer. */
 	struct wlr_scene_tree *tree = node->parent;
 	while (tree != NULL && tree->node.data == NULL) {
 		tree = tree->node.parent;
@@ -716,16 +598,7 @@ static struct tinywl_toplevel *desktop_toplevel_at(
 	return tree->node.data;
 }
 
-/*
- * Edge-snap ("split screen") tuning.
- *
- * SNAP_MARGIN_PX is how close the cursor must get to a screen edge, while
- * interactively moving a window, before that edge "arms" — the preview
- * rect appears, and releasing the button snaps the window there. Left/
- * right zones cover the full edge height; the top zone (full-screen /
- * maximize) only arms very close to the top, so it doesn't fight with
- * the left/right zones near the corners.
- */
+/* Edge-snap tuning: how close the cursor must get to an edge before that zone arms. */
 #define SNAP_MARGIN_PX     24
 
 #define SNAP_PREVIEW_R  0.20f
@@ -733,10 +606,7 @@ static struct tinywl_toplevel *desktop_toplevel_at(
 #define SNAP_PREVIEW_B  0.85f
 #define SNAP_PREVIEW_A  0.35f
 
-/* Fills *out_box / *out_w / *out_h with the first output's geometry.
- * Returns false (leaving them at whatever they were) if there's no
- * output yet. Small helper shared by maximize/fullscreen/snap, all of
- * which only ever operate against the primary (first) output. */
+/* Primary output geometry helper, shared by maximize/fullscreen/snap. */
 static bool get_primary_output_box(struct tinywl_server *server,
 		struct wlr_box *out_box, int *out_w, int *out_h) {
 	if (wl_list_empty(&server->outputs)) {
@@ -837,13 +707,7 @@ static void reset_cursor_mode(struct tinywl_server *server) {
 		(server->cursor_mode == TINYWL_CURSOR_MOVE ||
 		 server->cursor_mode == TINYWL_CURSOR_RESIZE)) {
 
-		/*
-		 * If a move ended over an armed snap zone, apply it: resize/
-		 * reposition the window to that half (or all) of the screen,
-		 * remembering its pre-snap geometry so a later drag-away or
-		 * un-snap can restore it — same saved_geometry field maximize
-		 * uses, since a window is never both at once.
-		 */
+		/* Apply an armed snap zone: resize/reposition and save the pre-snap geometry. */
 		if (server->cursor_mode == TINYWL_CURSOR_MOVE &&
 				server->snap_pending != TINYWL_SNAP_NONE) {
 			struct tinywl_toplevel *toplevel = server->grabbed_toplevel;
@@ -900,18 +764,8 @@ static void process_cursor_move(struct tinywl_server *server, uint32_t time) {
 	}
 }
 
-
 static void process_cursor_resize(struct tinywl_server *server, uint32_t time) {
-	/*
-	 * Resizing the grabbed toplevel can be a little bit complicated, because we
-	 * could be resizing from any corner or edge. This not only resizes the
-	 * toplevel on one or two axes, but can also move the toplevel if you resize
-	 * from the top or left edges (or top-left corner).
-	 *
-	 * Note that some shortcuts are taken here. In a more fleshed-out
-	 * compositor, you'd wait for the client to prepare a buffer at the new
-	 * size, then commit any movement that was prepared.
-	 */
+	/* Resize (and possibly move) the grabbed toplevel from any edge or corner. */
 	struct tinywl_toplevel *toplevel = server->grabbed_toplevel;
 	double border_x = server->cursor->x - server->grab_x;
 	double border_y = server->cursor->y - server->grab_y;
@@ -984,22 +838,9 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
 	if (server->pointer_button_count > 0 && server->pointer_grab_surface &&
 			!server->seat->drag) {
 		/*
-		 * Implicit pointer grab: a button is held down, so keep sending
-		 * motion to the surface that had focus when it was pressed,
-		 * regardless of what's physically under the cursor right now.
-		 * Without this, dragging a text selection (or anything else
-		 * drag-based) past the edge of its window froze in place until
-		 * the cursor moved back inside — the moment nothing else was
-		 * under the cursor, pointer focus got cleared entirely below.
-		 *
-		 * This must NOT apply while a wl_data_device drag-and-drop is in
-		 * progress (server->seat->drag != NULL). During DnD, wlroots relies
-		 * on pointer focus actually following whatever surface is under the
-		 * cursor to fire drag-enter/motion/leave on the drop target. Locking
-		 * focus to the origin surface meant the target (e.g. dragging a file
-		 * from xarchiver onto Thunar, or vice versa) never received a
-		 * drag-enter, so it could never accept the drop — in either
-		 * direction, since both sides hit this same grab.
+		 * Implicit pointer grab: keep motion on the surface that had the button press,
+		 * except during a wl_data_device drag-and-drop, where focus must follow
+		 * the surface under the cursor.
 		 */
 		surface = server->pointer_grab_surface;
 		sx = server->cursor->x - server->pointer_grab_offset_x;
@@ -1017,17 +858,7 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
 		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
 	}
 	if (surface) {
-		/*
-		 * Send pointer enter and motion events.
-		 *
-		 * The enter event gives the surface "pointer focus", which is distinct
-		 * from keyboard focus. You get pointer focus by moving the pointer over
-		 * a window.
-		 *
-		 * Note that wlroots will avoid sending duplicate enter/motion events if
-		 * the surface has already has pointer focus or if the client is already
-		 * aware of the coordinates passed.
-		 */
+		/* Send pointer enter/motion; wlroots dedupes repeated events automatically. */
 		wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
 		wlr_seat_pointer_notify_motion(seat, time, sx, sy);
 	} else {
@@ -1043,11 +874,7 @@ static void server_cursor_motion(struct wl_listener *listener, void *data) {
 	struct tinywl_server *server =
 		wl_container_of(listener, server, cursor_motion);
 	struct wlr_pointer_motion_event *event = data;
-	/* The cursor doesn't move unless we tell it to. The cursor automatically
-	 * handles constraining the motion to the output layout, as well as any
-	 * special configuration applied for the specific input device which
-	 * generated the event. You can pass NULL for the device if you want to move
-	 * the cursor around without any input. */
+	/* Move the cursor; passing NULL for the device moves it without input. */
 	wlr_cursor_move(server->cursor, &event->pointer->base,
 			event->delta_x, event->delta_y);
 	process_cursor_motion(server, event->time_msec);
@@ -1055,12 +882,7 @@ static void server_cursor_motion(struct wl_listener *listener, void *data) {
 
 static void server_cursor_motion_absolute(
 		struct wl_listener *listener, void *data) {
-	/* This event is forwarded by the cursor when a pointer emits an _absolute_
-	 * motion event, from 0..1 on each axis. This happens, for example, when
-	 * wlroots is running under a Wayland window rather than KMS+DRM, and you
-	 * move the mouse over the window. You could enter the window from any edge,
-	 * so we have to warp the mouse there. There is also some hardware which
-	 * emits these events. */
+	/* Absolute pointer motion (0..1 per axis); warp the cursor to match. */
 	struct tinywl_server *server =
 		wl_container_of(listener, server, cursor_motion_absolute);
 	struct wlr_pointer_motion_absolute_event *event = data;
@@ -1083,14 +905,7 @@ static void toggle_maximize(struct tinywl_toplevel *toplevel) {
 			toplevel->saved_geometry.y);
 		toplevel->maximized = false;
 	} else {
-		/*
-		 * Save current geometry before maximizing — unless the window is
-		 * currently snapped to a screen edge, in which case saved_geometry
-		 * already holds its real pre-snap size (see reset_cursor_mode()).
-		 * Capturing "current" geometry here would instead save the half-
-		 * screen snapped size, so un-maximizing later would restore to
-		 * that instead of the window's original size.
-		 */
+		/* Save pre-maximize geometry, unless already snapped (saved_geometry then holds the real pre-snap size). */
 		if (!toplevel->snapped) {
 			struct wlr_box geo;
 			wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
@@ -1206,11 +1021,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
 			server->cursor->x, server->cursor->y, &surface, &sx, &sy);
 
-	/*
-	 * Right-click (BTN_RIGHT) on background/root:
-	 * - If menu is already visible → close it
-	 * - If menu is not visible → show menu at cursor position
-	 */
+	/* Right-click on background/root toggles the menu. */
 	if (event->button == BTN_RIGHT &&
 	    event->state  == WLR_BUTTON_PRESSED &&
 	    toplevel == NULL) {
@@ -1272,10 +1083,7 @@ static void server_cursor_axis(struct wl_listener *listener, void *data) {
 }
 
 static void server_cursor_frame(struct wl_listener *listener, void *data) {
-	/* This event is forwarded by the cursor when a pointer emits an frame
-	 * event. Frame events are sent after regular pointer events to group
-	 * multiple events together. For instance, two axis events may happen at the
-	 * same time, in which case a frame event won't be sent in between. */
+	/* Pointer frame event: groups related pointer events together. */
 	struct tinywl_server *server =
 		wl_container_of(listener, server, cursor_frame);
 	/* Notify the client with pointer focus of the frame event. */
@@ -1307,15 +1115,7 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 	const struct wlr_output_event_request_state *event = data;
 	wlr_output_commit_state(output->wlr_output, event->state);
 
-	/*
-	 * The background and panel are sized/positioned against the output's
-	 * resolution once, at creation time. Without re-running that here,
-	 * resizing the host window afterwards (e.g. maximizing tinywl's
-	 * nested X11 backend window on top of Xfce) left the wallpaper and
-	 * taskbar pinned to the OLD, smaller size while the window itself
-	 * grew — leaving a cut-off black/empty area on the rest of the
-	 * screen.
-	 */
+	/* Re-layout background/panel on output resize. */
 	struct tinywl_server *server = output->server;
 	if (server->background) {
 		tinywl_background_resize(server->background, server);
@@ -1336,23 +1136,9 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	free(output);
 
 	/*
-	 * If that was the last output (e.g. tinywl is running nested as an
-	 * ordinary window on top of a host session and that window's close
-	 * button was clicked), there's nothing left to render to. Without
-	 * this, the compositor keeps running headless in the background —
-	 * still holding its Wayland socket, XWayland, and services alive —
-	 * so new apps that prefer Wayland when WAYLAND_DISPLAY is set end up
-	 * silently connecting to this now-invisible compositor instead of
-	 * the host session, instead of appearing on screen anywhere.
-	 *
-	 * Restricted to nested backends (X11/Wayland) only: on a real DRM/KMS
-	 * session started from a login display manager, momentary output
-	 * churn (mode changes, lease/master handoff during a VT switch,
-	 * hotplug rescans) can transiently leave the output list empty
-	 * without the session actually having ended. Terminating there too
-	 * killed the whole compositor prematurely and unpredictably, which
-	 * is what made logging back in via the display manager fail until it
-	 * was restarted.
+	 * Terminate if the last output disappeared, but only for nested backends
+	 * (X11/Wayland); on real DRM/KMS, transient empty output lists during
+	 * mode/VT changes shouldn't kill the compositor.
 	 */
 	if (wl_list_empty(&server->outputs) &&
 			tinywl_backend_is_nested(server->backend)) {
@@ -1377,11 +1163,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	wlr_output_state_init(&state);
 	wlr_output_state_set_enabled(&state, true);
 
-	/* Some backends don't have modes. DRM+KMS does, and we need to set a mode
-	 * before we can use the output. The mode is a tuple of (width, height,
-	 * refresh rate), and each monitor supports only a specific set of modes. We
-	 * just pick the monitor's preferred mode, a more sophisticated compositor
-	 * would let the user configure it. */
+	/* Pick the output's preferred mode. */
 	struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
 	if (mode != NULL) {
 		wlr_output_state_set_mode(&state, mode);
@@ -1410,15 +1192,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 
 	wl_list_insert(&server->outputs, &output->link);
 
-	/* Adds this to the output layout. The add_auto function arranges outputs
-	 * from left-to-right in the order they appear. A more sophisticated
-	 * compositor would let the user configure the arrangement of outputs in the
-	 * layout.
-	 *
-	 * The output layout utility automatically adds a wl_output global to the
-	 * display, which Wayland clients can see to find out information about the
-	 * output (such as DPI, scale factor, manufacturer, etc).
-	 */
+	/* Add the output to the layout (left-to-right) and expose a wl_output global. */
 	struct wlr_output_layout_output *l_output = wlr_output_layout_add_auto(server->output_layout,
 		wlr_output);
 	struct wlr_scene_output *scene_output = wlr_scene_output_create(server->scene, wlr_output);
@@ -1437,24 +1211,10 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 		state_loaded = load_window_state(toplevel, toplevel->xdg_toplevel->app_id);
 	}
 
-	/*
-	 * Saved state is keyed by app_id alone. Short-lived dialogs (Save /
-	 * Overwrite / Delete confirmations, etc.) very often share the SAME
-	 * app_id as their application's main window — VS Code being a common
-	 * example — so without this check a tiny dialog would blindly inherit
-	 * the main window's last saved position/size, making it appear
-	 * wherever the main window happened to be (e.g. a corner of the
-	 * screen) instead of centered like a fresh dialog should be.
-	 */
+	/* Skip restoring saved geometry for short-lived dialogs that share their parent's app_id. */
 	if (state_loaded) {
 		if (toplevel->saved_geometry.width <= 0 || toplevel->saved_geometry.height <= 0) {
-			/*
-			 * A 0x0 saved size means nothing valid was ever actually
-			 * stored for this app_id (or the entry is otherwise
-			 * corrupt) — trusting its x,y position anyway is how a
-			 * dialog previously ended up pinned at (0,0) instead of
-			 * centered. Treat it as not loaded.
-			 */
+			/* A 0x0 saved size means nothing was actually stored; treat it as not loaded. */
 			state_loaded = false;
 		} else {
 			struct wlr_box current_geo;
@@ -1467,10 +1227,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 					width_diff  <= toplevel->saved_geometry.width  / 4 &&
 					height_diff <= toplevel->saved_geometry.height / 4;
 
-				/* If the size we're about to restore doesn't reasonably
-				 * match what this surface is actually asking for right
-				 * now, treat it as not loaded so it falls through to
-				 * the normal "center new window" path below. */
+				/* Saved size doesn't match what the surface is asking for; treat as not loaded. */
 				if (!size_matches_saved) {
 					state_loaded = false;
 				}
@@ -1767,13 +1524,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		reset_cursor_mode(server);
 	}
 
-	/*
-	 * If this window held keyboard focus (e.g. a short-lived dialog like
-	 * pinentry or a file picker closing), pass focus back to another
-	 * window instead of leaving the seat with no focused surface — which
-	 * is what made focus seem "stuck" until something was clicked
-	 * manually.
-	 */
+	/* Return keyboard focus to another window when the focused one closes. */
 	bool was_focused = server->seat->keyboard_state.focused_surface ==
 			toplevel->xdg_toplevel->base->surface;
 
@@ -1784,14 +1535,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	if (was_focused) {
 		struct tinywl_toplevel *next = NULL;
 
-		/*
-		 * Prefer returning focus to this toplevel's actual parent (the
-		 * window that spawned it, e.g. a dialog closing back to the
-		 * xfce4-terminal that opened it) over just picking whichever
-		 * window happens to be first in the list — otherwise, with
-		 * several windows open, focus could land on an unrelated one
-		 * instead of where the user was actually working.
-		 */
+		/* Prefer returning focus to the closing toplevel's actual parent window. */
 		struct wlr_xdg_toplevel *wlr_parent = toplevel->xdg_toplevel->parent;
 		if (wlr_parent) {
 			struct tinywl_toplevel *t;
@@ -1859,13 +1603,7 @@ static void begin_interactive(struct tinywl_toplevel *toplevel,
 
 	if (mode == TINYWL_CURSOR_MOVE) {
 		if (toplevel->snapped) {
-			/*
-			 * Restore the window to its pre-snap size before starting the
-			 * drag, keeping the cursor at the same relative X position
-			 * over it — grabbing a snapped window's titlebar and pulling
-			 * it away un-snaps it naturally, instead of dragging it
-			 * around stuck at half-screen size.
-			 */
+			/* Restore pre-snap size before dragging, so grabbing a snapped titlebar un-snaps it. */
 			struct wlr_box cur_geo;
 			wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &cur_geo);
 			int cur_x = toplevel->scene_tree->node.x;
@@ -1912,34 +1650,21 @@ static void begin_interactive(struct tinywl_toplevel *toplevel,
 
 static void xdg_toplevel_request_move(
 		struct wl_listener *listener, void *data) {
-	/* This event is raised when a client would like to begin an interactive
-	 * move, typically because the user clicked on their client-side
-	 * decorations. Note that a more sophisticated compositor should check the
-	 * provided serial against a list of button press serials sent to this
-	 * client, to prevent the client from requesting this whenever they want. */
+	/* Client requests an interactive move (e.g. from CSD). */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, request_move);
 	begin_interactive(toplevel, TINYWL_CURSOR_MOVE, 0);
 }
 
 static void xdg_toplevel_request_resize(
 		struct wl_listener *listener, void *data) {
-	/* This event is raised when a client would like to begin an interactive
-	 * resize, typically because the user clicked on their client-side
-	 * decorations. Note that a more sophisticated compositor should check the
-	 * provided serial against a list of button press serials sent to this
-	 * client, to prevent the client from requesting this whenever they want. */
+	/* Client requests an interactive resize (e.g. from CSD). */
 	struct wlr_xdg_toplevel_resize_event *event = data;
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, request_resize);
 	begin_interactive(toplevel, TINYWL_CURSOR_RESIZE, event->edges);
 }
 
 void minimize_toplevel(struct tinywl_toplevel *toplevel) {
-	/*
-	 * Hide the window by disabling its scene tree node.
-	 * The XDG-shell protocol has no minimized state — compositors simply
-	 * stop rendering the surface.  We store the state in toplevel->minimized
-	 * so the taskbar can show it as minimized and restore on click.
-	 */
+	/* Minimize: xdg-shell has no minimized state, so just hide the scene node. */
 	if (toplevel->minimized)
 		return;
 	toplevel->minimized = true;
@@ -1968,10 +1693,7 @@ void minimize_toplevel(struct tinywl_toplevel *toplevel) {
 }
 
 void restore_toplevel(struct tinywl_toplevel *toplevel) {
-	/*
-	 * Restore a minimized window: re-enable the scene node and focus it.
-	 * Called via the panel callback when the user clicks the taskbar button.
-	 */
+	/* Restore a minimized window and give it focus. */
 	if (!toplevel->minimized) {
 		/* Not minimized — just focus */
 		focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
@@ -2029,28 +1751,8 @@ static void xdg_toplevel_request_minimize(
 }
 
 /*
- * Tells a brand-new popup how much screen space it actually has, via the
- * xdg-positioner protocol's own constraint-adjustment mechanism, BEFORE
- * its first configure is sent.
- *
- * This is a different (and more important) fix than apply_popup_constraint()
- * above: that one only slides an already-committed popup back on-screen
- * after the client has drawn it at whatever size it pleased. A well-behaved
- * client (GTK's combobox dropdowns, e.g. Thunar's "Archive type" list) only
- * shrinks its popup and adds a scrollbar if the compositor tells it, via
- * the positioner's constraint box, that it doesn't have unlimited room —
- * otherwise it just renders the full, unclipped list and lets it run off
- * the bottom of the screen with no way to scroll to the rest, since it
- * never knew it needed to. Calling wlr_xdg_popup_unconstrain_from_box()
- * here, synchronously within the new_popup handler and before any
- * configure goes out, lets the client's own positioner logic (slide/flip/
- * resize per xdg_positioner constraint_adjustment) do the right thing
- * from the very first frame.
- *
- * `box` must be in the coordinate system of the popup's root toplevel
- * ancestor's surface — found the same way raise_popup_owner_above_panel()
- * finds the toplevel to raise: walk scene_tree_root_child() up from the
- * immediate parent to the root-level scene node.
+ * Unconstrain a new popup via its positioner before the first configure,
+ * so clients size themselves correctly from the start.
  */
 static void unconstrain_new_popup(struct tinywl_server *server,
 		struct wlr_xdg_surface *xdg_surface, struct wlr_scene_tree *parent_tree) {
@@ -2081,11 +1783,7 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 		wl_container_of(listener, server, new_xdg_surface);
 	struct wlr_xdg_surface *xdg_surface = data;
 
-	/* We must add xdg popups to the scene graph so they get rendered. The
-	 * wlroots scene graph provides a helper for this, but to use it we must
-	 * provide the proper parent scene node of the xdg popup. To enable this,
-	 * we always set the user data field of xdg_surfaces to the corresponding
-	 * scene node. */
+	/* Add xdg popups to the scene graph via their parent's scene node. */
 	if (xdg_surface->role == WLR_XDG_SURFACE_ROLE_POPUP) {
 		struct wlr_xdg_surface *parent =
 			wlr_xdg_surface_try_from_wlr_surface(xdg_surface->popup->parent);
@@ -2095,12 +1793,6 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 			parent_tree, xdg_surface);
 		xdg_surface->data = popup_tree;
 
-		/*
-		 * Must happen before the popup's first configure goes out (see
-		 * unconstrain_new_popup()'s comment) — this is the earliest point
-		 * we have both the popup's xdg_surface and its parent's scene
-		 * tree, so do it right here rather than waiting for map/commit.
-		 */
 		unconstrain_new_popup(server, xdg_surface, parent_tree);
 
 		/* Create popup tracker to apply constraints when mapped */
@@ -2197,32 +1889,20 @@ int main(int argc, char *argv[]) {
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	server.wl_display = wl_display_create();
 
-	/*
-	 * Register signal handling as early as possible, right after the
-	 * wl_display (and therefore its event loop) exists, and before
-	 * anything else in main() has a chance to fork() a child. See
-	 * handle_sigchld()'s comment above for why this matters: without it,
-	 * every launched program becomes a permanent zombie once it exits.
-	 */
+	/* Register signal handling early, before any child processes are forked. */
 	struct wl_event_loop *term_loop = wl_display_get_event_loop(server.wl_display);
 	wl_event_loop_add_signal(term_loop, SIGINT, handle_term_signal, server.wl_display);
 	wl_event_loop_add_signal(term_loop, SIGTERM, handle_term_signal, server.wl_display);
 	wl_event_loop_add_signal(term_loop, SIGCHLD, handle_sigchld, NULL);
 
-	/* The backend is a wlroots feature which abstracts the underlying input and
-	 * output hardware. The autocreate option will choose the most suitable
-	 * backend based on the current environment, such as opening an X11 window
-	 * if an X11 server is running. */
+	/* Autocreate the backend for the current environment. */
 	server.backend = wlr_backend_autocreate(server.wl_display, NULL);
 	if (server.backend == NULL) {
 		wlr_log(WLR_ERROR, "failed to create wlr_backend");
 		return 1;
 	}
 
-	/* Autocreates a renderer, either Pixman, GLES2 or Vulkan for us. The user
-	 * can also specify a renderer using the WLR_RENDERER env var.
-	 * The renderer is responsible for defining the various pixel formats it
-	 * supports for shared memory, this configures that for clients. */
+	/* Autocreate the renderer (Pixman/GLES2/Vulkan, or via WLR_RENDERER). */
 	server.renderer = wlr_renderer_autocreate(server.backend);
 	if (server.renderer == NULL) {
 		wlr_log(WLR_ERROR, "failed to create wlr_renderer");
@@ -2231,10 +1911,7 @@ int main(int argc, char *argv[]) {
 
 	wlr_renderer_init_wl_display(server.renderer, server.wl_display);
 
-	/* Autocreates an allocator for us.
-	 * The allocator is the bridge between the renderer and the backend. It
-	 * handles the buffer creation, allowing wlroots to render onto the
-	 * screen */
+	/* Autocreate the allocator bridging renderer and backend. */
 	server.allocator = wlr_allocator_autocreate(server.backend,
 		server.renderer);
 	if (server.allocator == NULL) {
@@ -2242,13 +1919,7 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	/* This creates some hands-off wlroots interfaces. The compositor is
-	 * necessary for clients to allocate surfaces, the subcompositor allows to
-	 * assign the role of subsurfaces to surfaces and the data device manager
-	 * handles the clipboard. Each of these wlroots interfaces has room for you
-	 * to dig your fingers in and play with their behavior if you want. Note that
-	 * the clients cannot set the selection directly without compositor approval,
-	 * see the handling of the request_set_selection event below.*/
+	/* Core wlroots interfaces: compositor, subcompositor, data device manager. */
 	server.compositor = wlr_compositor_create(server.wl_display, 5, server.renderer);
 	wlr_subcompositor_create(server.wl_display);
 	wlr_data_device_manager_create(server.wl_display);
@@ -2270,29 +1941,14 @@ int main(int argc, char *argv[]) {
 	server.new_output.notify = server_new_output;
 	wl_signal_add(&server.backend->events.new_output, &server.new_output);
 
-	/* Create a scene graph. This is a wlroots abstraction that handles all
-	 * rendering and damage tracking. All the compositor author needs to do
-	 * is add things that should be rendered to the scene graph at the proper
-	 * positions and then call wlr_scene_output_commit() to render a frame if
-	 * necessary.
-	 */
+	/* Scene graph handles rendering and damage tracking. */
 	server.scene = wlr_scene_create();
 	server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
 
-	/*
-	 * Dedicated scene tree that drag-and-drop icons get attached to
-	 * (see seat_start_drag / process_cursor_motion). Created once here
-	 * so it always exists as a stable parent, whether or not a drag is
-	 * currently in progress.
-	 */
+	/* Scene tree that drag-and-drop icons attach to. */
 	server.drag_icon = wlr_scene_tree_create(&server.scene->tree);
 
-	/*
-	 * Translucent preview rect for edge-snap ("split screen"). Created
-	 * once, hidden by default, resized/repositioned/raised and toggled
-	 * by update_snap_preview() while a window is being dragged near a
-	 * screen edge (see process_cursor_move()/reset_cursor_mode()).
-	 */
+	/* Preview rect for edge-snap, toggled while dragging near a screen edge. */
 	{
 		const float snap_color[4] = {
 			SNAP_PREVIEW_R, SNAP_PREVIEW_G, SNAP_PREVIEW_B, SNAP_PREVIEW_A
@@ -2304,10 +1960,7 @@ int main(int argc, char *argv[]) {
 		}
 	}
 
-	/* Set up xdg-shell version 3. The xdg-shell is a Wayland protocol which is
-	 * used for application windows. For more detail on shells, refer to
-	 * https://drewdevault.com/2018/07/29/Wayland-shells.html.
-	 */
+	/* xdg-shell protocol for application windows. */
 	wl_list_init(&server.toplevels);
 	wl_list_init(&server.popups);
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
@@ -2315,29 +1968,14 @@ int main(int argc, char *argv[]) {
 	wl_signal_add(&server.xdg_shell->events.new_surface,
 			&server.new_xdg_surface);
 
-	/*
-	 * Creates a cursor, which is a wlroots utility for tracking the cursor
-	 * image shown on screen.
-	 */
+	/* Cursor: tracks the on-screen cursor image. */
 	server.cursor = wlr_cursor_create();
 	wlr_cursor_attach_output_layout(server.cursor, server.output_layout);
 
-	/* Creates an xcursor manager, another wlroots utility which loads up
-	 * Xcursor themes to source cursor images from and makes sure that cursor
-	 * images are available at all scale factors on the screen (necessary for
-	 * HiDPI support). Uses Adwaita theme at size 24. */
+	/* Xcursor manager for cursor themes across scale factors (Adwaita, size 24). */
 	server.cursor_mgr = wlr_xcursor_manager_create("Adwaita", 24);
 
-	/*
-	 * wlr_cursor *only* displays an image on screen. It does not move around
-	 * when the pointer moves. However, we can attach input devices to it, and
-	 * it will generate aggregate events for all of them. In these events, we
-	 * can choose how we want to process them, forwarding them to clients and
-	 * moving the cursor around. More detail on this process is described in
-	 * https://drewdevault.com/2018/07/17/Input-handling-in-wlroots.html.
-	 *
-	 * And more comments are sprinkled throughout the notify functions above.
-	 */
+	/* wlr_cursor only displays the cursor; attached input devices generate the motion events handled above. */
 	server.cursor_mode = TINYWL_CURSOR_PASSTHROUGH;
 	server.cursor_motion.notify = server_cursor_motion;
 	wl_signal_add(&server.cursor->events.motion, &server.cursor_motion);
@@ -2351,12 +1989,7 @@ int main(int argc, char *argv[]) {
 	server.cursor_frame.notify = server_cursor_frame;
 	wl_signal_add(&server.cursor->events.frame, &server.cursor_frame);
 
-	/*
-	 * Configures a seat, which is a single "seat" at which a user sits and
-	 * operates the computer. This conceptually includes up to one keyboard,
-	 * pointer, touch, and drawing tablet device. We also rig up a listener to
-	 * let us know when new input devices are available on the backend.
-	 */
+	/* Configure the seat (keyboard/pointer/touch/tablet) and watch for new input devices. */
 	wl_list_init(&server.keyboards);
 	server.new_input.notify = server_new_input;
 	wl_signal_add(&server.backend->events.new_input, &server.new_input);
@@ -2373,12 +2006,7 @@ int main(int argc, char *argv[]) {
         server.start_drag.notify = seat_start_drag;
         wl_signal_add(&server.seat->events.start_drag,
                         &server.start_drag);
-	/*
-	 * Initialize right-click popup menu.
-	 * This menu replicates the system.twmrc "defops" menu from TWM,
-	 * triggered by a right-click on the background (root) –
-	 * analogous to "Button1 = : root : f.menu \"defops\"" in twmrc.
-	 */
+	/* Init right-click background menu (replicates TWM's "defops" menu). */
 	server.menu = tinywl_menu_init(&server);
 	if (!server.menu) {
 		wlr_log(WLR_ERROR, "Failed to initialize menu");
@@ -2394,11 +2022,7 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	/*
-	 * Register cleanup for this exact socket/lock file immediately, before
-	 * anything else can fail and return early — see cleanup_wayland_socket_files
-	 * above for why this matters.
-	 */
+	/* Register socket/lock cleanup immediately after creating them. */
 	const char *runtime_dir_for_socket = getenv("XDG_RUNTIME_DIR");
 	if (runtime_dir_for_socket) {
 		snprintf(wayland_socket_path, sizeof(wayland_socket_path),
@@ -2420,37 +2044,21 @@ int main(int argc, char *argv[]) {
 	 * startup command if requested. */
 	setenv("WAYLAND_DISPLAY", socket, true);
 
-	/*
-	 * Start background services: D-Bus session, XWayland, GVFS, Polkit,
-	 * PulseAudio/PipeWire, settings daemon.
-	 * Must be called after setenv("WAYLAND_DISPLAY", …) so that child
-	 * processes inherit the correct socket name.
-	 */
+	/* Start background services: D-Bus, XWayland, GVFS, Polkit, audio, settings daemon. */
 	server.services = tinywl_services_init(&server);
 	if (!server.services) {
 		wlr_log(WLR_ERROR, "Failed to initialise background services");
 		/* Non-fatal: compositor runs fine without them */
 	}
 
-	/*
-	 * Load and display the desktop wallpaper.  This must be called after
-	 * wlr_backend_start() (so at least one output is available) and after
-	 * setenv("WAYLAND_DISPLAY", …) (so the internal wl_shm client can
-	 * connect).  Creating the background node before the menu ensures it
-	 * sits below all other scene nodes.
-	 */
+	/* Load the wallpaper; must run after the backend starts and WAYLAND_DISPLAY is set. */
 	server.background = tinywl_background_create(&server);
 	if (!server.background) {
 		wlr_log(WLR_ERROR, "Failed to initialise background");
 		/* Non-fatal: compositor works fine without a background */
 	}
 
-	/*
-	 * Create the bottom panel (Weston-style taskbar).
-	 * Must be called after wlr_backend_start() (output geometry is known)
-	 * and after setenv("WAYLAND_DISPLAY", …) (internal wl_shm client needs it).
-	 * Created after background so the panel scene tree sits above the wallpaper.
-	 */
+	/* Create the bottom panel; must run after the backend starts and WAYLAND_DISPLAY is set. */
 	server.panel = tinywl_panel_create(&server);
 	if (!server.panel) {
 		wlr_log(WLR_ERROR, "Failed to initialise panel");
@@ -2464,25 +2072,15 @@ int main(int argc, char *argv[]) {
 			execl("/bin/sh", "/bin/sh", "-c", startup_cmd, (void *)NULL);
 		}
 	}
-	/* Run the Wayland event loop. This does not return until you exit the
-	 * compositor. Starting the backend rigged up all of the necessary event
-	 * loop configuration to listen to libinput events, DRM events, generate
-	 * frame events at the refresh rate, and so on. */
+	/* Run the Wayland event loop until the compositor exits. */
 	wlr_log(WLR_INFO, "Running Wayland compositor on WAYLAND_DISPLAY=%s",
 			socket);
 
 	wl_display_run(server.wl_display);
 
 	/*
-	 * Remove the Wayland socket/lock files FIRST, before anything else in
-	 * shutdown. tinywl_services_destroy() below can block for up to ~2s
-	 * waiting for child services (xfsettingsd, gvfsd, pulseaudio, ...) to
-	 * exit; if the session manager's own logout timeout is shorter than
-	 * that, it SIGKILLs this whole process before reaching the atexit
-	 * handler, leaving a stale socket file that later confuses tools like
-	 * neofetch into thinking a Wayland session is still active. Doing it
-	 * here, immediately, means the socket is gone regardless of whether
-	 * the rest of shutdown gets to complete.
+	 * Remove the socket/lock files first: service shutdown can block, and a session
+	 * manager's logout timeout may SIGKILL this process before atexit runs.
 	 */
 	cleanup_wayland_socket_files();
 

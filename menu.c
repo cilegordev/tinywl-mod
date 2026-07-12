@@ -1,16 +1,6 @@
 /*
- * menu.c – Right-click popup menu for TinyWL (wlroots 0.17.4)
- *
- * Rendering:
- *   - wlr_scene_rect  : row backgrounds (proven stable)
- *   - wlr_scene_buffer: text overlay (Cairo → wl_shm → wlr_buffer_try_from_resource)
- *
- * Creates wlr_buffer via internal Wayland client WITHOUT blocking:
- *   - No wl_display_roundtrip() → no deadlock
- *   - All operations are non-blocking:
- *     wl_display_flush() + wl_event_loop_dispatch(loop, 0) + dispatch_pending()
- *
- * If wlr_scene_buffer creation fails, the menu still displays using rects only.
+ * menu.c: right-click popup menu. Row backgrounds via wlr_scene_rect, text via a Cairo/wl_shm overlay,
+ * uploaded through a non-blocking internal Wayland client (no roundtrip). Falls back to rects-only if the buffer fails.
  */
 
 #define _GNU_SOURCE
@@ -223,14 +213,7 @@ static bool text_buf_create(struct tinywl_menu *m) {
     struct wl_event_loop *loop =
         wl_display_get_event_loop(m->server->wl_display);
 
-    /*
-     * Dispatch loop using correct pattern:
-     * 1. Flush client → server
-     * 2. Dispatch compositor (process requests, send responses)
-     * 3. Flush server → client
-     * 4. Read client socket (poll 1ms) + dispatch pending
-     * Repeat until wl_shm is found, max 50 iterations.
-     */
+    /* Dispatch loop: flush client, dispatch compositor, flush server, poll+dispatch client, repeat until wl_shm is found (max 50 iterations). */
     for (int i = 0; i < 50 && !m->shm_ctx.ready; i++) {
         /* Flush client requests to compositor */
         wl_display_flush(m->shm_ctx.display);

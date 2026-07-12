@@ -1,20 +1,6 @@
 /*
- * background.c - Wallpaper rendering for TinyWL
- *
- * Pipeline:
- *   PNG file  →  Cairo image surface  →  scaled Cairo surface
- *             →  memfd-backed wl_shm buffer  →  wlr_buffer
- *             →  wlr_scene_buffer  (lowest node in scene tree)
- *
- * The internal Wayland client is created via socketpair() +
- * wl_client_create() + wl_display_connect_to_fd(), which gives us a
- * direct wl_client* pointer without having to walk the opaque client
- * list.  This is the same non-blocking pattern used by menu.c.
- *
- * Fallback behaviour:
- *   If the PNG cannot be loaded or any upload step fails, a solid
- *   dark-grey wlr_scene_rect is inserted instead so the compositor
- *   remains fully functional without a wallpaper file.
+ * background.c: wallpaper rendering. PNG -> Cairo surface -> wl_shm buffer -> wlr_scene_buffer.
+ * Falls back to a solid dark-grey rect if the PNG can't be loaded or uploaded.
  */
 
 #define _GNU_SOURCE
@@ -103,12 +89,7 @@ struct tinywl_background {
 
 /* Helpers */
 
-/*
- * create_scaled_surface() - Decode a PNG and scale it to (out_w x out_h).
- *
- * Returns a CAIRO_FORMAT_ARGB32 image surface owned by the caller, or NULL
- * on any error.  The caller must call cairo_surface_destroy() when done.
- */
+/* create_scaled_surface: decode a PNG and scale it to (out_w x out_h); returns a CAIRO_FORMAT_ARGB32 surface owned by the caller. */
 static cairo_surface_t *create_scaled_surface(const char *path,
                                                int out_w, int out_h)
 {
@@ -151,20 +132,7 @@ static cairo_surface_t *create_scaled_surface(const char *path,
     return dst;
 }
 
-/*
- * upload_via_shm() - Upload pixel data through an internal wl_shm client.
- *
- * Uses socketpair() + wl_client_create() + wl_display_connect_to_fd() so
- * we hold a direct wl_client* pointer from the start — no client-list
- * iteration required.
- *
- * Dispatch loop mirrors menu.c exactly (non-blocking, no roundtrip):
- *   flush client -> flush+dispatch compositor -> poll+read client -> dispatch
- *
- * On success fills bg->wl_client, bg->shm_ctx, bg->memfd/memdata/memsize,
- * bg->wl_buf/wl_buf_id and returns a valid wlr_buffer*.
- * Returns NULL on any failure.
- */
+/* upload_via_shm: upload pixel data through an internal wl_shm client (socketpair + wl_client_create), same non-blocking pattern as menu.c. */
 static struct wlr_buffer *upload_via_shm(struct tinywl_background *bg,
                                           struct tinywl_server *server,
                                           const uint8_t *pixels,
@@ -299,13 +267,7 @@ static struct wlr_buffer *upload_via_shm(struct tinywl_background *bg,
 
 /* Public API */
 
-/*
- * background_cleanup_resources() - Tear down everything created by a
- * previous generation of the wallpaper (scene node, internal wl_shm
- * client, shared memory) WITHOUT freeing the tinywl_background struct
- * itself, so the same struct/pointer can be reused for a fresh
- * generation (see tinywl_background_resize below).
- */
+/* background_cleanup_resources: tear down a previous wallpaper generation's scene node/shm client without freeing the struct itself, so it can be reused. */
 static void background_cleanup_resources(struct tinywl_background *bg)
 {
     if (bg->scene_buf)
@@ -339,15 +301,7 @@ static void background_cleanup_resources(struct tinywl_background *bg)
     bg->memfd = -1;
 }
 
-/*
- * background_regenerate() - (Re)builds the wallpaper (or solid-colour
- * fallback) into an already-allocated tinywl_background struct, sized to
- * whatever the first output currently reports. Used both for the initial
- * creation and for resizing when an output's resolution changes (e.g. the
- * nested X11 backend's host window being resized/maximized after tinywl
- * has already started, which does not happen at startup and was
- * previously never handled at all).
- */
+/* background_regenerate: (re)build the wallpaper or fallback rect sized to the current output; used for initial creation and for resize. */
 static void background_regenerate(struct tinywl_background *bg,
                                    struct tinywl_server *server)
 {
@@ -388,14 +342,7 @@ static void background_regenerate(struct tinywl_background *bg,
         goto fallback;
     }
 
-    /*
-     * Place the scene buffer at the root of the scene tree.
-     * Because tinywl_background_create() is called before the menu is
-     * initialised and before any toplevels exist, this node ends up at the
-     * bottom of the scene graph and is therefore rendered behind everything.
-     * On a resize (background_regenerate called again later), it's placed
-     * back at the root the same way, so it stays behind existing windows.
-     */
+    /* Place the scene buffer at the root of the scene tree so it renders behind everything else (menu, panel, toplevels not yet created). */
     bg->scene_buf = wlr_scene_buffer_create(&server->scene->tree, wlr_buf);
     if (!bg->scene_buf) {
         wlr_log(WLR_ERROR, "background: wlr_scene_buffer_create failed");

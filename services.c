@@ -13,24 +13,14 @@
 
 #include <wlr/util/log.h>
 
-/*
- * We pull in the minimum needed from wlroots for XWayland.
- * The WLR_USE_UNSTABLE guard is already defined via CFLAGS in the Makefile.
- */
+/* Pull in the minimum needed from wlroots for XWayland (WLR_USE_UNSTABLE set via the Makefile). */
 #include <wlr/xwayland.h>
 #include <wlr/backend.h>
 #include <wlr/backend/x11.h>
 #include <wlr/backend/wayland.h>
 #include <wlr/backend/multi.h>
 
-/*
- * wlr_backend_autocreate() always wraps whatever it picks in a multi-backend
- * (this has been true since wlroots' backend.c was rewritten years ago), so
- * server->backend is never itself the X11/Wayland backend even when running
- * nested inside an existing session — it's the multi-backend container
- * around it. wlr_backend_is_x11()/wlr_backend_is_wl() on the container
- * alone always return false; we have to walk its children to find out.
- */
+/* wlr_backend_autocreate() always wraps the chosen backend in a multi-backend, so we must walk its children to detect X11/Wayland nesting. */
 static void mark_if_nested(struct wlr_backend *backend, void *data) {
     bool *found = data;
     if (wlr_backend_is_x11(backend) || wlr_backend_is_wl(backend)) {
@@ -90,14 +80,7 @@ static void record_pid(struct tinywl_services *svc, pid_t pid, const char *name)
     svc->count++;
 }
 
-/*
- * spawn_service – fork+exec a service command.
- * argv[0] is the executable, the array must be NULL-terminated.
- * Returns the child PID on success, -1 on failure.
- *
- * The child redirects stdout/stderr to /dev/null to avoid polluting the
- * compositor's terminal, then replaces itself with execvp().
- */
+/* spawn_service: fork+exec argv (NULL-terminated). Returns the child PID, or -1 on failure. */
 static pid_t spawn_service(const char *name, char *const argv[]) {
     pid_t pid = fork();
     if (pid < 0) {
@@ -122,10 +105,7 @@ static pid_t spawn_service(const char *name, char *const argv[]) {
     return pid;
 }
 
-/*
- * program_exists – check whether a binary is on PATH using execvp dry-run via
- * a quick /usr/bin/which invocation.  Returns true if found.
- */
+/* program_exists: check whether a binary is on PATH via a `which` invocation. */
 static bool program_exists(const char *prog) {
     /* Fast path: try common absolute locations */
     char buf[256];
@@ -141,10 +121,7 @@ static bool program_exists(const char *prog) {
     return false;
 }
 
-/*
- * find_polkit_agent – search for a known polkit authentication agent binary.
- * Returns a malloc'd string with the full path, or NULL.
- */
+/* find_polkit_agent: search for a known polkit authentication agent binary; returns a malloc'd path or NULL. */
 static char *find_polkit_agent(void) {
     /* Preferred agents in order */
     const char *agents[] = {
@@ -253,31 +230,12 @@ static void handle_xwayland_ready(struct wl_listener *listener, void *data) {
         wlr_log(WLR_INFO, "services: XWayland ready, DISPLAY=%s", display_name);
     }
 
-    /*
-     * wlr_xwayland_set_seat must be called from the ready handler.
-     * This wires up keyboard/pointer focus for X11 windows.
-     */
+    /* wlr_xwayland_set_seat must be called from the ready handler to wire up keyboard/pointer focus for X11 windows. */
     wlr_xwayland_set_seat(svc->xwayland, svc->server->seat);
 
     svc->xwayland_ready_flag = true;
 
-    /*
-     * Start the settings daemon now that DISPLAY definitely points at
-     * *our* XWayland, so it can register X11 root-window properties
-     * (DPI, font, cursor theme) on tinywl's display and nothing else.
-     *
-     * This is the ONLY place xfsettingsd is spawned. Spawning it earlier
-     * (before this callback) would use whatever DISPLAY was inherited at
-     * process start — e.g. a host Xfce session's own :0 — and register a
-     * single-instance daemon on the shared D-Bus bus against the wrong
-     * display, which then gets killed out from under that host session
-     * when tinywl_services_destroy() runs.
-     *
-     * Also skipped entirely when nested inside an existing X11 session
-     * (see tinywl_services_init): xfsettingsd is single-instance over
-     * D-Bus regardless of which X display it's pointed at, so the host
-     * session's own instance would conflict with ours anyway.
-     */
+    /* xfsettingsd is spawned only here, once DISPLAY points at our own XWayland, and skipped when nested (see tinywl_services_init). */
     bool nested = tinywl_backend_is_nested(svc->server->backend);
     if (!nested && program_exists("xfsettingsd")) {
         char *argv[] = { "xfsettingsd", NULL };
@@ -290,11 +248,7 @@ static void handle_xwayland_ready(struct wl_listener *listener, void *data) {
 static bool start_xwayland(struct tinywl_services *svc) {
     struct tinywl_server *server = svc->server;
 
-    /*
-     * wlr_xwayland_create() will start Xwayland internally.
-     * We pass lazy=false so it starts immediately rather than on first X11 client.
-     * This ensures DISPLAY is set before we launch services that may query it.
-     */
+    /* wlr_xwayland_create() starts Xwayland immediately (lazy=false) so DISPLAY is set before dependent services launch. */
     svc->xwayland = wlr_xwayland_create(server->wl_display,
                                          server->compositor,
                                          false /* lazy */);
@@ -314,11 +268,7 @@ static bool start_xwayland(struct tinywl_services *svc) {
 /* GVFS */
 
 static void start_gvfs(struct tinywl_services *svc) {
-    /*
-     * gvfsd is the main GVFS daemon; gvfsd-fuse mounts virtual filesystems
-     * under ~/.gvfs so applications can access smb://, sftp://, etc.
-     * We also start gvfs-udisks2-volume-monitor for physical drives.
-     */
+    /* gvfsd handles GVFS mounts (smb://, sftp://, ...); gvfs-udisks2-volume-monitor covers physical drives. */
     if (!program_exists("gvfsd")) {
         wlr_log(WLR_INFO, "services: gvfsd not found, skipping GVFS");
         return;
@@ -381,10 +331,7 @@ static void start_polkit(struct tinywl_services *svc) {
 
 /* PulseAudio */
 static void start_audio(struct tinywl_services *svc) {
-    /*
-     * Start PulseAudio daemon if not already running.
-     * Don't start if the socket already exists (another instance is running).
-     */
+    /* Start PulseAudio if its socket doesn't already exist. */
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     if (!runtime)
         runtime = "/run/user/1000"; /* reasonable fallback */
@@ -428,20 +375,7 @@ struct tinywl_services *tinywl_services_init(struct tinywl_server *server) {
 
     svc->server = server;
 
-    /*
-     * If tinywl is running nested inside an existing X11 session (e.g.
-     * opened as an ordinary window on top of a running Xfce desktop, for
-     * testing), wlroots picks the X11 backend automatically because
-     * DISPLAY is already set (see wlr_backend_autocreate() in tinywl.c).
-     * In that case the host session (Xfce) already runs its own
-     * per-session singleton daemons — settings daemon, GVFS, a
-     * PolicyKit authentication agent, audio — and they're reachable on
-     * the same (reused) D-Bus session bus. Starting our own copies on
-     * top just duplicates them and, for anything that registers a
-     * single well-known D-Bus name (like the PolicyKit agent), causes
-     * outright errors ("An authentication agent already exists ...")
-     * instead of silently coexisting. Skip them entirely when nested.
-     */
+    /* Skip per-session daemons (settings, GVFS, polkit, audio) when nested inside an existing X11 session, since the host already runs them on the shared D-Bus bus. */
     bool nested = tinywl_backend_is_nested(server->backend);
     if (nested) {
         wlr_log(WLR_INFO,
@@ -458,15 +392,7 @@ struct tinywl_services *tinywl_services_init(struct tinywl_server *server) {
         record_pid(svc, dbus_pid, "dbus-daemon");
     /* dbus_pid == 0 means we reused an existing bus — that's fine */
 
-    /*
-     * 2. XWayland — start early so DISPLAY is available for X11 clients.
-     *    The ready signal fires asynchronously once the event loop runs.
-     *    xfsettingsd is spawned from that same callback (handle_xwayland_ready),
-     *    once DISPLAY definitely points at our own XWayland — not before.
-     *    Always needed, nested or not: it's what lets tinywl itself host
-     *    X11 clients, which the host session's own X server doesn't do
-     *    for us.
-     */
+    /* XWayland starts early so DISPLAY is available; xfsettingsd is spawned later from handle_xwayland_ready once DISPLAY is confirmed. */
     start_xwayland(svc);
 
     if (!nested) {
