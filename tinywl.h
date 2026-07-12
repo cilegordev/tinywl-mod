@@ -66,6 +66,18 @@ typedef enum tinywl_cursor_mode {
     TINYWL_CURSOR_RESIZE,
 } tinywl_cursor_mode;
 
+/*
+ * Edge-snap ("split screen") zone. Detected from cursor position while
+ * interactively moving a window (see process_cursor_move() in tinywl.c);
+ * TINYWL_SNAP_NONE means "not near an edge, move normally".
+ */
+typedef enum tinywl_snap_zone {
+    TINYWL_SNAP_NONE,
+    TINYWL_SNAP_LEFT,
+    TINYWL_SNAP_RIGHT,
+    TINYWL_SNAP_TOP,
+} tinywl_snap_zone;
+
 /* Structs */
 
 struct tinywl_server {
@@ -115,6 +127,18 @@ struct tinywl_server {
     double                         grab_x, grab_y;
     struct wlr_box                 grab_geobox;
     uint32_t                       resize_edges;
+
+    /*
+     * Edge-snap ("split screen") preview shown while interactively moving
+     * a window near a screen edge. snap_pending is recomputed on every
+     * cursor motion during a move (TINYWL_SNAP_NONE when not near an
+     * edge); snap_preview is the translucent rect that previews where
+     * the window will land, created once and toggled/repositioned as
+     * needed. See process_cursor_move() and reset_cursor_mode() in
+     * tinywl.c.
+     */
+    tinywl_snap_zone                snap_pending;
+    struct wlr_scene_rect          *snap_preview;
 
     struct wlr_output_layout      *output_layout;
     struct wl_list                 outputs;
@@ -167,6 +191,15 @@ struct tinywl_toplevel {
     /* Maximize state */
     bool            maximized;
     struct wlr_box  saved_geometry; /* x,y,width,height before maximize */
+
+    /*
+     * Edge-snap ("split screen") state. A snapped window shares
+     * saved_geometry with maximize for its "restore to this" size/pos —
+     * a window is only ever snapped OR maximized, never both, so reusing
+     * that field avoids a redundant second saved-geometry box.
+     */
+    bool             snapped;
+    tinywl_snap_zone snapped_zone;
 
     /* Fullscreen state */
     bool            fullscreen;

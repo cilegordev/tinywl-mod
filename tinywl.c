@@ -716,11 +716,166 @@ static struct tinywl_toplevel *desktop_toplevel_at(
 	return tree->node.data;
 }
 
+/*
+ * Edge-snap ("split screen") tuning.
+ *
+ * SNAP_MARGIN_PX is how close the cursor must get to a screen edge, while
+ * interactively moving a window, before that edge "arms" — the preview
+ * rect appears, and releasing the button snaps the window there. Left/
+ * right zones cover the full edge height; the top zone (full-screen /
+ * maximize) only arms very close to the top, so it doesn't fight with
+ * the left/right zones near the corners.
+ */
+#define SNAP_MARGIN_PX     24
+
+#define SNAP_PREVIEW_R  0.20f
+#define SNAP_PREVIEW_G  0.45f
+#define SNAP_PREVIEW_B  0.85f
+#define SNAP_PREVIEW_A  0.35f
+
+/* Fills *out_box / *out_w / *out_h with the first output's geometry.
+ * Returns false (leaving them at whatever they were) if there's no
+ * output yet. Small helper shared by maximize/fullscreen/snap, all of
+ * which only ever operate against the primary (first) output. */
+static bool get_primary_output_box(struct tinywl_server *server,
+		struct wlr_box *out_box, int *out_w, int *out_h) {
+	if (wl_list_empty(&server->outputs)) {
+		return false;
+	}
+	struct tinywl_output *output =
+		wl_container_of(server->outputs.next, output, link);
+	wlr_output_effective_resolution(output->wlr_output, out_w, out_h);
+	wlr_output_layout_get_box(server->output_layout, output->wlr_output, out_box);
+	return true;
+}
+
+/* Which snap zone (if any) the cursor is currently within, given it's
+ * mid-drag moving a window. Only checked against the primary output. */
+static tinywl_snap_zone compute_snap_zone(struct tinywl_server *server) {
+	struct wlr_box out_box = {0};
+	int out_w = 0, out_h = 0;
+	if (!get_primary_output_box(server, &out_box, &out_w, &out_h)) {
+		return TINYWL_SNAP_NONE;
+	}
+
+	double cx = server->cursor->x;
+	double cy = server->cursor->y;
+
+	if (cy <= out_box.y + SNAP_MARGIN_PX) {
+		return TINYWL_SNAP_TOP;
+	}
+	if (cx <= out_box.x + SNAP_MARGIN_PX) {
+		return TINYWL_SNAP_LEFT;
+	}
+	if (cx >= out_box.x + out_w - SNAP_MARGIN_PX) {
+		return TINYWL_SNAP_RIGHT;
+	}
+	return TINYWL_SNAP_NONE;
+}
+
+/* Target (x, y, width, height) a window should land at for a given snap
+ * zone, on the primary output, accounting for the panel's height the same
+ * way toggle_maximize() does. Returns false if there's no output. */
+static bool snap_zone_box(struct tinywl_server *server, tinywl_snap_zone zone,
+		struct wlr_box *box) {
+	struct wlr_box out_box = {0};
+	int out_w = 0, out_h = 0;
+	if (!get_primary_output_box(server, &out_box, &out_w, &out_h)) {
+		return false;
+	}
+	int usable_h = out_h - tinywl_panel_get_height(server->panel);
+
+	switch (zone) {
+	case TINYWL_SNAP_LEFT:
+		box->x = out_box.x;
+		box->y = out_box.y;
+		box->width  = out_w / 2;
+		box->height = usable_h;
+		return true;
+	case TINYWL_SNAP_RIGHT:
+		box->x = out_box.x + out_w / 2;
+		box->y = out_box.y;
+		box->width  = out_w - out_w / 2;
+		box->height = usable_h;
+		return true;
+	case TINYWL_SNAP_TOP:
+		box->x = out_box.x;
+		box->y = out_box.y;
+		box->width  = out_w;
+		box->height = usable_h;
+		return true;
+	default:
+		return false;
+	}
+}
+
+/* Shows/repositions or hides the snap preview rect to match `zone`
+ * (TINYWL_SNAP_NONE hides it). Cheap to call on every motion event. */
+static void update_snap_preview(struct tinywl_server *server, tinywl_snap_zone zone) {
+	if (!server->snap_preview) return;
+
+	if (zone == TINYWL_SNAP_NONE) {
+		wlr_scene_node_set_enabled(&server->snap_preview->node, false);
+		return;
+	}
+
+	struct wlr_box box;
+	if (!snap_zone_box(server, zone, &box)) {
+		wlr_scene_node_set_enabled(&server->snap_preview->node, false);
+		return;
+	}
+
+	wlr_scene_rect_set_size(server->snap_preview, box.width, box.height);
+	wlr_scene_node_set_position(&server->snap_preview->node, box.x, box.y);
+	wlr_scene_node_raise_to_top(&server->snap_preview->node);
+	wlr_scene_node_set_enabled(&server->snap_preview->node, true);
+}
+
 static void reset_cursor_mode(struct tinywl_server *server) {
 	/* Reset the cursor mode to passthrough. */
-	if (server->grabbed_toplevel && 
-		(server->cursor_mode == TINYWL_CURSOR_MOVE || 
+	if (server->grabbed_toplevel &&
+		(server->cursor_mode == TINYWL_CURSOR_MOVE ||
 		 server->cursor_mode == TINYWL_CURSOR_RESIZE)) {
+
+		/*
+		 * If a move ended over an armed snap zone, apply it: resize/
+		 * reposition the window to that half (or all) of the screen,
+		 * remembering its pre-snap geometry so a later drag-away or
+		 * un-snap can restore it — same saved_geometry field maximize
+		 * uses, since a window is never both at once.
+		 */
+		if (server->cursor_mode == TINYWL_CURSOR_MOVE &&
+				server->snap_pending != TINYWL_SNAP_NONE) {
+			struct tinywl_toplevel *toplevel = server->grabbed_toplevel;
+			struct wlr_box box;
+			if (snap_zone_box(server, server->snap_pending, &box)) {
+				if (!toplevel->snapped && !toplevel->maximized) {
+					struct wlr_box geo;
+					wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
+					toplevel->saved_geometry.x = toplevel->scene_tree->node.x;
+					toplevel->saved_geometry.y = toplevel->scene_tree->node.y;
+					toplevel->saved_geometry.width  = geo.width;
+					toplevel->saved_geometry.height = geo.height;
+				}
+				if (server->snap_pending == TINYWL_SNAP_TOP) {
+					/* Top zone snaps full-screen, i.e. maximize. */
+					wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
+					toplevel->maximized = true;
+					toplevel->snapped = false;
+					toplevel->snapped_zone = TINYWL_SNAP_NONE;
+				} else {
+					toplevel->snapped = true;
+					toplevel->snapped_zone = server->snap_pending;
+				}
+				wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
+					box.width, box.height);
+				wlr_scene_node_set_position(&toplevel->scene_tree->node,
+					box.x, box.y);
+			}
+		}
+		server->snap_pending = TINYWL_SNAP_NONE;
+		update_snap_preview(server, TINYWL_SNAP_NONE);
+
 		/* Save the window state after resize/move is complete */
 		save_window_state(server->grabbed_toplevel);
 	}
@@ -734,7 +889,17 @@ static void process_cursor_move(struct tinywl_server *server, uint32_t time) {
 	wlr_scene_node_set_position(&toplevel->scene_tree->node,
 		server->cursor->x - server->grab_x,
 		server->cursor->y - server->grab_y);
+
+	/* Re-evaluate the snap zone every motion event and keep the preview
+	 * in sync — this is what makes the split-screen preview track the
+	 * cursor as it approaches an edge while dragging. */
+	tinywl_snap_zone zone = compute_snap_zone(server);
+	if (zone != server->snap_pending) {
+		server->snap_pending = zone;
+		update_snap_preview(server, zone);
+	}
 }
+
 
 static void process_cursor_resize(struct tinywl_server *server, uint32_t time) {
 	/*
@@ -918,13 +1083,24 @@ static void toggle_maximize(struct tinywl_toplevel *toplevel) {
 			toplevel->saved_geometry.y);
 		toplevel->maximized = false;
 	} else {
-		/* Save current geometry before maximizing */
-		struct wlr_box geo;
-		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
-		toplevel->saved_geometry.x = toplevel->scene_tree->node.x;
-		toplevel->saved_geometry.y = toplevel->scene_tree->node.y;
-		toplevel->saved_geometry.width  = geo.width;
-		toplevel->saved_geometry.height = geo.height;
+		/*
+		 * Save current geometry before maximizing — unless the window is
+		 * currently snapped to a screen edge, in which case saved_geometry
+		 * already holds its real pre-snap size (see reset_cursor_mode()).
+		 * Capturing "current" geometry here would instead save the half-
+		 * screen snapped size, so un-maximizing later would restore to
+		 * that instead of the window's original size.
+		 */
+		if (!toplevel->snapped) {
+			struct wlr_box geo;
+			wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
+			toplevel->saved_geometry.x = toplevel->scene_tree->node.x;
+			toplevel->saved_geometry.y = toplevel->scene_tree->node.y;
+			toplevel->saved_geometry.width  = geo.width;
+			toplevel->saved_geometry.height = geo.height;
+		}
+		toplevel->snapped = false;
+		toplevel->snapped_zone = TINYWL_SNAP_NONE;
 
 		/* Get output dimensions */
 		struct tinywl_output *output = NULL;
@@ -1714,6 +1890,37 @@ static void begin_interactive(struct tinywl_toplevel *toplevel,
 	server->cursor_mode = mode;
 
 	if (mode == TINYWL_CURSOR_MOVE) {
+		if (toplevel->snapped) {
+			/*
+			 * Restore the window to its pre-snap size before starting the
+			 * drag, keeping the cursor at the same relative X position
+			 * over it — grabbing a snapped window's titlebar and pulling
+			 * it away un-snaps it naturally, instead of dragging it
+			 * around stuck at half-screen size.
+			 */
+			struct wlr_box cur_geo;
+			wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &cur_geo);
+			int cur_x = toplevel->scene_tree->node.x;
+			int cur_w = cur_geo.width > 0 ? cur_geo.width : 1;
+
+			double rel_x = (server->cursor->x - cur_x) / (double)cur_w;
+			if (rel_x < 0.0) rel_x = 0.0;
+			if (rel_x > 1.0) rel_x = 1.0;
+
+			int new_w = toplevel->saved_geometry.width  > 0 ?
+				toplevel->saved_geometry.width  : cur_w;
+			int new_h = toplevel->saved_geometry.height > 0 ?
+				toplevel->saved_geometry.height : cur_geo.height;
+			int new_x = (int)(server->cursor->x - rel_x * new_w);
+			int new_y = (int)server->cursor->y - 10;
+
+			wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, new_w, new_h);
+			wlr_scene_node_set_position(&toplevel->scene_tree->node, new_x, new_y);
+
+			toplevel->snapped = false;
+			toplevel->snapped_zone = TINYWL_SNAP_NONE;
+		}
+
 		server->grab_x = server->cursor->x - toplevel->scene_tree->node.x;
 		server->grab_y = server->cursor->y - toplevel->scene_tree->node.y;
 	} else {
@@ -2057,6 +2264,23 @@ int main(int argc, char *argv[]) {
 	 * currently in progress.
 	 */
 	server.drag_icon = wlr_scene_tree_create(&server.scene->tree);
+
+	/*
+	 * Translucent preview rect for edge-snap ("split screen"). Created
+	 * once, hidden by default, resized/repositioned/raised and toggled
+	 * by update_snap_preview() while a window is being dragged near a
+	 * screen edge (see process_cursor_move()/reset_cursor_mode()).
+	 */
+	{
+		const float snap_color[4] = {
+			SNAP_PREVIEW_R, SNAP_PREVIEW_G, SNAP_PREVIEW_B, SNAP_PREVIEW_A
+		};
+		server.snap_preview =
+			wlr_scene_rect_create(&server.scene->tree, 1, 1, snap_color);
+		if (server.snap_preview) {
+			wlr_scene_node_set_enabled(&server.snap_preview->node, false);
+		}
+	}
 
 	/* Set up xdg-shell version 3. The xdg-shell is a Wayland protocol which is
 	 * used for application windows. For more detail on shells, refer to
