@@ -2028,6 +2028,52 @@ static void xdg_toplevel_request_minimize(
 	minimize_toplevel(toplevel);
 }
 
+/*
+ * Tells a brand-new popup how much screen space it actually has, via the
+ * xdg-positioner protocol's own constraint-adjustment mechanism, BEFORE
+ * its first configure is sent.
+ *
+ * This is a different (and more important) fix than apply_popup_constraint()
+ * above: that one only slides an already-committed popup back on-screen
+ * after the client has drawn it at whatever size it pleased. A well-behaved
+ * client (GTK's combobox dropdowns, e.g. Thunar's "Archive type" list) only
+ * shrinks its popup and adds a scrollbar if the compositor tells it, via
+ * the positioner's constraint box, that it doesn't have unlimited room —
+ * otherwise it just renders the full, unclipped list and lets it run off
+ * the bottom of the screen with no way to scroll to the rest, since it
+ * never knew it needed to. Calling wlr_xdg_popup_unconstrain_from_box()
+ * here, synchronously within the new_popup handler and before any
+ * configure goes out, lets the client's own positioner logic (slide/flip/
+ * resize per xdg_positioner constraint_adjustment) do the right thing
+ * from the very first frame.
+ *
+ * `box` must be in the coordinate system of the popup's root toplevel
+ * ancestor's surface — found the same way raise_popup_owner_above_panel()
+ * finds the toplevel to raise: walk scene_tree_root_child() up from the
+ * immediate parent to the root-level scene node.
+ */
+static void unconstrain_new_popup(struct tinywl_server *server,
+		struct wlr_xdg_surface *xdg_surface, struct wlr_scene_tree *parent_tree) {
+	struct wlr_box out_box = {0};
+	int out_w = 0, out_h = 0;
+	if (!get_primary_output_box(server, &out_box, &out_w, &out_h)) {
+		return;
+	}
+	int usable_h = out_h - tinywl_panel_get_height(server->panel);
+
+	struct wlr_scene_tree *root_child = scene_tree_root_child(server, parent_tree);
+	int root_x = root_child ? root_child->node.x : 0;
+	int root_y = root_child ? root_child->node.y : 0;
+
+	struct wlr_box box = {
+		.x = out_box.x - root_x,
+		.y = out_box.y - root_y,
+		.width  = out_w,
+		.height = usable_h,
+	};
+	wlr_xdg_popup_unconstrain_from_box(xdg_surface->popup, &box);
+}
+
 static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 	/* This event is raised when wlr_xdg_shell receives a new xdg surface from a
 	 * client, either a toplevel (application window) or popup. */
@@ -2048,7 +2094,15 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 		struct wlr_scene_tree *popup_tree = wlr_scene_xdg_surface_create(
 			parent_tree, xdg_surface);
 		xdg_surface->data = popup_tree;
-		
+
+		/*
+		 * Must happen before the popup's first configure goes out (see
+		 * unconstrain_new_popup()'s comment) — this is the earliest point
+		 * we have both the popup's xdg_surface and its parent's scene
+		 * tree, so do it right here rather than waiting for map/commit.
+		 */
+		unconstrain_new_popup(server, xdg_surface, parent_tree);
+
 		/* Create popup tracker to apply constraints when mapped */
 		struct tinywl_popup *popup = calloc(1, sizeof(*popup));
 		if (popup) {
