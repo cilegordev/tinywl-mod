@@ -114,6 +114,10 @@ struct wlr_buffer *wlr_buffer_try_from_resource(struct wl_resource *resource);
 #define TASK_BTN_MAX_W    200
 #define TASK_BTN_MIN_W    80
 
+/* Minimum horizontal cursor travel (px) after pressing a taskbar button
+ * before it counts as a drag-to-reorder rather than a click. */
+#define DRAG_THRESHOLD_PX 6.0
+
 /* Calendar tooltip (shown when hovering the clock area) */
 #define CAL_TOOLTIP_W     200
 #define CAL_TOOLTIP_H     196
@@ -224,8 +228,23 @@ struct tinywl_panel {
     struct panel_task        tasks[MAX_TASKS];
     int                      n_tasks;
 
+    /*
+     * order[slot] = index into tasks[] that currently occupies visual
+     * slot `slot` (0 = leftmost). Reordering the taskbar via drag only
+     * ever permutes this array — the tasks[] entries themselves (and
+     * their wl_listeners) never move, which sidesteps the stale-listener
+     * hazard documented in tinywl_panel_on_unmap().
+     */
+    int                      order[MAX_TASKS];
+
     struct tinywl_toplevel  *focused;
     int                      hovered;
+
+    /* Taskbar drag-to-reorder state */
+    bool                     drag_pending;  /* button down on a task, not yet dragging */
+    bool                     drag_active;    /* moved past the threshold, actively dragging */
+    int                      drag_slot;      /* current visual slot of the dragged task */
+    double                   drag_start_x;   /* cursor x at press, for threshold check */
 
     /* Calendar tooltip, shown while the cursor hovers the clock area */
     bool                     clock_hovered;
@@ -255,6 +274,10 @@ struct tinywl_panel {
 
 static void panel_layout(struct tinywl_panel *p);
 static void panel_redraw(struct tinywl_panel *p);
+static int panel_slot_for_real(struct tinywl_panel *p, int real);
+static int panel_target_slot_for_x(struct tinywl_panel *p, double ox);
+static void panel_move_order(struct tinywl_panel *p, int from, int to);
+static void panel_order_remove_physical(struct tinywl_panel *p, int removed_phys, int old_n_tasks);
 static struct wlr_buffer *panel_calendar_shm_upload(struct tinywl_panel *p);
 static void panel_draw_calendar(struct tinywl_panel *p);
 static void panel_calendar_redraw(struct tinywl_panel *p);
@@ -292,14 +315,15 @@ static void panel_layout(struct tinywl_panel *p)
     if (btn_w < TASK_BTN_MIN_W) btn_w = TASK_BTN_MIN_W;
 
     int cur_x = 0;
-    for (int i = 0; i < p->n_tasks; i++) {
-        p->tasks[i].x = cur_x;
-        p->tasks[i].w = btn_w;
+    for (int slot = 0; slot < p->n_tasks; slot++) {
+        int real = p->order[slot];
+        p->tasks[real].x = cur_x;
+        p->tasks[real].w = btn_w;
 
-        if (!p->task_rects[i]) { cur_x += btn_w; continue; }
+        if (!p->task_rects[slot]) { cur_x += btn_w; continue; }
 
-        bool focused = (p->tasks[i].toplevel == p->focused);
-        bool hovered = (i == p->hovered && !focused);
+        bool focused = (p->tasks[real].toplevel == p->focused);
+        bool hovered = (real == p->hovered && !focused);
 
         float cr, cg, cb, ca;
         if (focused) {
@@ -310,18 +334,18 @@ static void panel_layout(struct tinywl_panel *p)
             cr = 0.0f; cg = 0.0f; cb = 0.0f; ca = 0.0f;
         }
         const float col[4] = { cr, cg, cb, ca };
-        wlr_scene_rect_set_color(p->task_rects[i], col);
-        wlr_scene_rect_set_size(p->task_rects[i], btn_w, PANEL_HEIGHT);
-        wlr_scene_node_set_position(&p->task_rects[i]->node, cur_x, 0);
-        wlr_scene_node_set_enabled(&p->task_rects[i]->node, true);
+        wlr_scene_rect_set_color(p->task_rects[slot], col);
+        wlr_scene_rect_set_size(p->task_rects[slot], btn_w, PANEL_HEIGHT);
+        wlr_scene_node_set_position(&p->task_rects[slot]->node, cur_x, 0);
+        wlr_scene_node_set_enabled(&p->task_rects[slot]->node, true);
 
         /* Separator on right edge */
-        if (p->sep_rects[i]) {
+        if (p->sep_rects[slot]) {
             const float sc[4] = { SEP_R, SEP_G, SEP_B, SEP_A };
-            wlr_scene_rect_set_color(p->sep_rects[i], sc);
-            wlr_scene_rect_set_size(p->sep_rects[i], 1, PANEL_HEIGHT);
-            wlr_scene_node_set_position(&p->sep_rects[i]->node, cur_x + btn_w - 1, 0);
-            wlr_scene_node_set_enabled(&p->sep_rects[i]->node, true);
+            wlr_scene_rect_set_color(p->sep_rects[slot], sc);
+            wlr_scene_rect_set_size(p->sep_rects[slot], 1, PANEL_HEIGHT);
+            wlr_scene_node_set_position(&p->sep_rects[slot]->node, cur_x + btn_w - 1, 0);
+            wlr_scene_node_set_enabled(&p->sep_rects[slot]->node, true);
         }
 
         cur_x += btn_w;
@@ -786,12 +810,95 @@ static bool panel_hit_clock(struct tinywl_panel *p, double ox, double oy)
     return px >= p->out_w - CLOCK_AREA_W;
 }
 
+/* Taskbar drag-to-reorder helpers
+ * -------------------------------
+ * Reordering only ever permutes p->order[] (which physical tasks[] entry
+ * occupies which visual slot). The tasks[] entries and their wl_listeners
+ * never move, so none of the stale-listener hazards that on_unmap has to
+ * work around apply here — this is plain integer bookkeeping.
+ */
+
+/* Visual slot currently occupied by physical task index `real`, or -1. */
+static int panel_slot_for_real(struct tinywl_panel *p, int real)
+{
+    for (int s = 0; s < p->n_tasks; s++) {
+        if (p->order[s] == real) return s;
+    }
+    return -1;
+}
+
+/* Which visual slot the cursor's x position corresponds to, based on the
+ * midpoint of each button — i.e. "insert here" rather than raw hit-test.
+ * Falls back to the first/last slot when ox is outside the taskbar. */
+static int panel_target_slot_for_x(struct tinywl_panel *p, double ox)
+{
+    if (p->n_tasks <= 0) return -1;
+    int px = (int)ox;
+    for (int s = 0; s < p->n_tasks; s++) {
+        int real = p->order[s];
+        int mid  = p->tasks[real].x + p->tasks[real].w / 2;
+        if (px < mid) return s;
+    }
+    return p->n_tasks - 1;
+}
+
+/* Moves the order[] entry at slot `from` to slot `to`, shifting the
+ * entries in between. Pure array bookkeeping, no listeners touched. */
+static void panel_move_order(struct tinywl_panel *p, int from, int to)
+{
+    if (from == to || from < 0 || to < 0 ||
+        from >= p->n_tasks || to >= p->n_tasks)
+        return;
+
+    int moved = p->order[from];
+    if (from < to) {
+        for (int i = from; i < to; i++) p->order[i] = p->order[i + 1];
+    } else {
+        for (int i = from; i > to; i--) p->order[i] = p->order[i - 1];
+    }
+    p->order[to] = moved;
+}
+
+/* Keeps order[] consistent with the physical compaction that
+ * tinywl_panel_on_unmap() performs: drops the slot that referenced the
+ * removed physical index, and shifts down every remaining reference to a
+ * physical index above it (since that's exactly how the compaction moved
+ * things). `old_n_tasks` is p->n_tasks *before* the caller decremented it. */
+static void panel_order_remove_physical(struct tinywl_panel *p,
+                                          int removed_phys, int old_n_tasks)
+{
+    int new_len = 0;
+    for (int s = 0; s < old_n_tasks; s++) {
+        int v = p->order[s];
+        if (v == removed_phys) continue;
+        if (v > removed_phys) v--;
+        p->order[new_len++] = v;
+    }
+}
+
 /* Input handlers */
 
 static void on_cursor_motion(struct wl_listener *listener, void *data)
 {
     struct tinywl_panel *p = wl_container_of(listener, p, cursor_motion);
     (void)data;
+
+    if (p->drag_pending && !p->drag_active) {
+        if (fabs(p->server->cursor->x - p->drag_start_x) > DRAG_THRESHOLD_PX)
+            p->drag_active = true;
+    }
+
+    if (p->drag_active) {
+        int target = panel_target_slot_for_x(p, p->server->cursor->x);
+        if (target >= 0 && target != p->drag_slot) {
+            panel_move_order(p, p->drag_slot, target);
+            p->drag_slot = target;
+            panel_layout(p);
+            panel_redraw(p);
+        }
+        return;
+    }
+
     int prev = p->hovered;
     p->hovered = panel_hit_task(p, p->server->cursor->x, p->server->cursor->y);
     if (p->hovered != prev) {
@@ -811,9 +918,34 @@ static void on_cursor_button(struct wl_listener *listener, void *data)
     struct tinywl_panel *p = wl_container_of(listener, p, cursor_button);
     struct wlr_pointer_button_event *ev = data;
 
-    if (ev->button != BTN_LEFT ||
-        ev->state  != WLR_BUTTON_RELEASED)
+    if (ev->button != BTN_LEFT) return;
+
+    if (ev->state == WLR_BUTTON_PRESSED) {
+        /*
+         * Arm a potential drag. Nothing else happens yet — whether this
+         * turns into a reorder (drag_active, decided in on_cursor_motion
+         * once the cursor travels past DRAG_THRESHOLD_PX) or a plain click
+         * (handled below on release) is still undecided at press time.
+         */
+        int idx = panel_hit_task(p, p->server->cursor->x, p->server->cursor->y);
+        int slot = (idx >= 0) ? panel_slot_for_real(p, idx) : -1;
+        p->drag_pending = (slot >= 0);
+        p->drag_active  = false;
+        p->drag_slot    = slot;
+        p->drag_start_x = p->server->cursor->x;
         return;
+    }
+
+    /* ev->state == WLR_BUTTON_RELEASED */
+    if (p->drag_active) {
+        /* Reorder already applied live in on_cursor_motion; just settle. */
+        p->drag_active  = false;
+        p->drag_pending = false;
+        panel_layout(p);
+        panel_redraw(p);
+        return;
+    }
+    p->drag_pending = false;
 
     int idx = panel_hit_task(p, p->server->cursor->x, p->server->cursor->y);
     if (idx < 0 || idx >= p->n_tasks) return;
@@ -879,11 +1011,13 @@ struct tinywl_panel *tinywl_panel_create(struct tinywl_server *server)
     p->memfd      = -1;
     p->hovered    = -1;
     p->cal_memfd  = -1;
+    p->drag_slot  = -1;
 
     for (int i = 0; i < MAX_TASKS; i++) {
         wl_list_init(&p->tasks[i].set_title.link);
         wl_list_init(&p->tasks[i].destroy.link);
         p->tasks[i].panel = p;
+        p->order[i] = i;
     }
 
     /* Output geometry */
@@ -970,6 +1104,10 @@ void tinywl_panel_on_map(struct tinywl_panel *p, struct tinywl_toplevel *topleve
     t->destroy.notify = on_task_destroy;
     wl_signal_add(&toplevel->xdg_toplevel->base->events.destroy, &t->destroy);
 
+    /* New task's physical index is always the current n_tasks; append it
+     * as the new rightmost visual slot. */
+    p->order[p->n_tasks] = p->n_tasks;
+
     p->n_tasks++;
     panel_layout(p);
     panel_redraw(p);
@@ -984,6 +1122,8 @@ void tinywl_panel_on_unmap(struct tinywl_panel *p, struct tinywl_toplevel *tople
         if (p->tasks[i].toplevel == toplevel) { found = i; break; }
     }
     if (found < 0) return;
+
+    int old_n_tasks = p->n_tasks;
 
     wl_list_remove(&p->tasks[found].set_title.link);
     wl_list_remove(&p->tasks[found].destroy.link);
@@ -1038,6 +1178,14 @@ void tinywl_panel_on_unmap(struct tinywl_panel *p, struct tinywl_toplevel *tople
 
     if (p->focused == toplevel) p->focused = NULL;
     if (p->hovered >= p->n_tasks) p->hovered = -1;
+
+    panel_order_remove_physical(p, found, old_n_tasks);
+
+    /* A drag in progress refers to slots/physical indices that this
+     * removal may have just invalidated — simplest and safest is to
+     * cancel it outright; the user can just start the drag again. */
+    p->drag_pending = false;
+    p->drag_active  = false;
 
     panel_layout(p);
     panel_redraw(p);
