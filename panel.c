@@ -246,8 +246,9 @@ struct tinywl_panel {
     int                      drag_slot;      /* current visual slot of the dragged task */
     double                   drag_start_x;   /* cursor x at press, for threshold check */
 
-    /* Calendar tooltip, shown while the cursor hovers the clock area */
-    bool                     clock_hovered;
+    /* Calendar tooltip, opened by clicking the clock area (click again,
+     * or click anywhere else, to close it). */
+    bool                     calendar_open;
     struct wlr_scene_tree   *cal_tree;
     struct wlr_scene_buffer *cal_text_buf;
     struct wl_buffer        *cal_wl_buf;
@@ -905,12 +906,6 @@ static void on_cursor_motion(struct wl_listener *listener, void *data)
         panel_layout(p);
         panel_redraw(p);
     }
-
-    bool clock_now = panel_hit_clock(p, p->server->cursor->x, p->server->cursor->y);
-    if (clock_now != p->clock_hovered) {
-        p->clock_hovered = clock_now;
-        panel_calendar_show(p, clock_now);
-    }
 }
 
 static void on_cursor_button(struct wl_listener *listener, void *data)
@@ -946,6 +941,20 @@ static void on_cursor_button(struct wl_listener *listener, void *data)
         return;
     }
     p->drag_pending = false;
+
+    /* Clicking the clock area toggles the calendar popup open/closed. */
+    if (panel_hit_clock(p, p->server->cursor->x, p->server->cursor->y)) {
+        p->calendar_open = !p->calendar_open;
+        panel_calendar_show(p, p->calendar_open);
+        return;
+    }
+
+    /* Any other click closes the popup if it's open, but still lets the
+     * click act on whatever taskbar button (if any) it landed on below. */
+    if (p->calendar_open) {
+        p->calendar_open = false;
+        panel_calendar_show(p, false);
+    }
 
     int idx = panel_hit_task(p, p->server->cursor->x, p->server->cursor->y);
     if (idx < 0 || idx >= p->n_tasks) return;
@@ -1312,9 +1321,9 @@ void tinywl_panel_resize(struct tinywl_panel *p, struct tinywl_server *server)
     }
 
     /* The tooltip's screen position depends on out_w; force it closed
-     * rather than let it linger at a stale position until the next
-     * cursor move re-evaluates panel_hit_clock(). */
-    p->clock_hovered = false;
+     * rather than let it linger at a stale position — the user can just
+     * click the clock again to reopen it. */
+    p->calendar_open = false;
     panel_calendar_show(p, false);
 
     panel_layout(p);
