@@ -247,8 +247,21 @@ struct tinywl_panel {
     double                   drag_start_x;   /* cursor x at press, for threshold check */
 
     /* Calendar tooltip, opened by clicking the clock area (click again,
-     * or click anywhere else, to close it). */
+     * or click anywhere else, to close it).
+     *
+     * clock_hit_x/clock_hit_w is the *exact* click target — the clock
+     * text's own bounding box (plus a small padding margin) — computed
+     * fresh in panel_draw_text() every time the clock string is redrawn,
+     * since its width changes with the text (e.g. locale, AM/PM, date
+     * length). This deliberately does NOT reuse CLOCK_AREA_W, which is
+     * just the wider layout reservation that keeps taskbar buttons from
+     * overlapping the clock — using that for hit-testing was the bug:
+     * clicking empty panel space well before the actual date text still
+     * opened the popup.
+     */
     bool                     calendar_open;
+    int                      clock_hit_x;
+    int                      clock_hit_w;
     struct wlr_scene_tree   *cal_tree;
     struct wlr_scene_buffer *cal_text_buf;
     struct wl_buffer        *cal_wl_buf;
@@ -422,6 +435,20 @@ static void panel_draw_text(struct tinywl_panel *p)
 
     double cx = (double)(p->out_w - PANEL_SPACING * 2) - ext.width;
     double cy = PANEL_HEIGHT / 2.0 - 1.0 + ext.height / 2.0;
+
+    /* Exact click target for the calendar popup — the text's own
+     * bounding box plus a small padding margin, NOT the wider
+     * CLOCK_AREA_W layout reservation. See the field comment on
+     * clock_hit_x/clock_hit_w. */
+    {
+        const int pad = 8;
+        int hit_x = (int)cx - pad;
+        if (hit_x < 0) hit_x = 0;
+        int hit_w = (int)ext.width + pad * 2;
+        if (hit_x + hit_w > p->out_w) hit_w = p->out_w - hit_x;
+        p->clock_hit_x = hit_x;
+        p->clock_hit_w = hit_w;
+    }
 
     cairo_move_to(cr, cx + 1.0, cy + 1.0);
     cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, TEXT_SHADOW_A);
@@ -802,13 +829,17 @@ static int panel_hit_task(struct tinywl_panel *p, double ox, double oy)
 }
 
 /* True when (ox, oy), in output-local coordinates, falls over the clock
- * zone on the right edge of the panel. */
+ * text itself — its exact bounding box (clock_hit_x/clock_hit_w, kept
+ * up to date by panel_draw_text()), not the wider CLOCK_AREA_W layout
+ * reservation. Clicking empty panel space near the clock must NOT open
+ * the calendar popup; only the date/time text itself should. */
 static bool panel_hit_clock(struct tinywl_panel *p, double ox, double oy)
 {
     int py = (int)oy - p->panel_y;
     if (py < 0 || py >= PANEL_HEIGHT) return false;
+    if (p->clock_hit_w <= 0) return false;
     int px = (int)ox;
-    return px >= p->out_w - CLOCK_AREA_W;
+    return px >= p->clock_hit_x && px < p->clock_hit_x + p->clock_hit_w;
 }
 
 /* Taskbar drag-to-reorder helpers
