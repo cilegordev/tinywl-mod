@@ -77,6 +77,8 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 
+#include <math.h>
+
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>
 #include <linux/input-event-codes.h>
@@ -111,6 +113,20 @@ struct wlr_buffer *wlr_buffer_try_from_resource(struct wl_resource *resource);
 #define MAX_TASKS         32
 #define TASK_BTN_MAX_W    200
 #define TASK_BTN_MIN_W    80
+
+/* Calendar tooltip (shown when hovering the clock area) */
+#define CAL_TOOLTIP_W     200
+#define CAL_TOOLTIP_H     196
+#define CAL_MARGIN          8
+#define CAL_HEADER_H       26
+#define CAL_WEEKDAY_H      18
+#define CAL_ROWS             6
+#define CAL_ROW_H         ((CAL_TOOLTIP_H - CAL_MARGIN * 2 - CAL_HEADER_H - CAL_WEEKDAY_H) / CAL_ROWS)
+
+#define CAL_BG_R  0.09f
+#define CAL_BG_G  0.09f
+#define CAL_BG_B  0.12f
+#define CAL_BG_A  0.96f
 
 /* Panel background */
 #define PANEL_BG_R  0.08f
@@ -211,6 +227,17 @@ struct tinywl_panel {
     struct tinywl_toplevel  *focused;
     int                      hovered;
 
+    /* Calendar tooltip, shown while the cursor hovers the clock area */
+    bool                     clock_hovered;
+    struct wlr_scene_tree   *cal_tree;
+    struct wlr_scene_buffer *cal_text_buf;
+    struct wl_buffer        *cal_wl_buf;
+    uint32_t                 cal_wl_buf_id;
+    int                      cal_memfd;
+    void                    *cal_memdata;
+    size_t                   cal_memsize;
+    int                      cal_stride;
+
     struct wl_listener       cursor_button;
     struct wl_listener       cursor_motion;
     struct wl_event_source  *clock_timer;
@@ -228,6 +255,11 @@ struct tinywl_panel {
 
 static void panel_layout(struct tinywl_panel *p);
 static void panel_redraw(struct tinywl_panel *p);
+static struct wlr_buffer *panel_calendar_shm_upload(struct tinywl_panel *p);
+static void panel_draw_calendar(struct tinywl_panel *p);
+static void panel_calendar_redraw(struct tinywl_panel *p);
+static void panel_calendar_show(struct tinywl_panel *p, bool show);
+static bool panel_hit_clock(struct tinywl_panel *p, double ox, double oy);
 
 /* Helpers */
 
@@ -485,6 +517,241 @@ static struct wlr_buffer *panel_shm_upload(struct tinywl_panel *p)
     return wlr_buf;
 }
 
+/* Calendar tooltip shm upload
+ *
+ * Reuses the wl_client/wl_shm connection already established by
+ * panel_shm_upload() for the main text overlay — only a second,
+ * fixed-size buffer is created here, since the tooltip's dimensions
+ * never depend on the output width.
+ */
+static struct wlr_buffer *panel_calendar_shm_upload(struct tinywl_panel *p)
+{
+    if (!p->shm_ctx.shm || !p->wl_client) return NULL;
+
+    p->cal_stride  = CAL_TOOLTIP_W * 4;
+    p->cal_memsize = (size_t)p->cal_stride * CAL_TOOLTIP_H;
+
+    p->cal_memfd = memfd_create("tinywl-panel-cal", MFD_CLOEXEC);
+    if (p->cal_memfd < 0) { wlr_log_errno(WLR_ERROR, "panel: cal memfd_create"); return NULL; }
+    if (ftruncate(p->cal_memfd, (off_t)p->cal_memsize) < 0) {
+        wlr_log_errno(WLR_ERROR, "panel: cal ftruncate");
+        close(p->cal_memfd); p->cal_memfd = -1; return NULL;
+    }
+    p->cal_memdata = mmap(NULL, p->cal_memsize, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, p->cal_memfd, 0);
+    if (p->cal_memdata == MAP_FAILED) {
+        wlr_log_errno(WLR_ERROR, "panel: cal mmap");
+        close(p->cal_memfd); p->cal_memfd = -1; p->cal_memdata = NULL; return NULL;
+    }
+    memset(p->cal_memdata, 0, p->cal_memsize);
+
+    struct wl_shm_pool *pool =
+        wl_shm_create_pool(p->shm_ctx.shm, p->cal_memfd, (int32_t)p->cal_memsize);
+    if (!pool) { wlr_log(WLR_ERROR, "panel: cal shm pool failed"); return NULL; }
+
+    p->cal_wl_buf = wl_shm_pool_create_buffer(pool, 0, CAL_TOOLTIP_W, CAL_TOOLTIP_H,
+                                               p->cal_stride, WL_SHM_FORMAT_ARGB8888);
+    wl_shm_pool_destroy(pool);
+    if (!p->cal_wl_buf) { wlr_log(WLR_ERROR, "panel: cal create_buffer failed"); return NULL; }
+
+    p->cal_wl_buf_id = wl_proxy_get_id((struct wl_proxy *)p->cal_wl_buf);
+
+    struct wl_event_loop *loop = wl_display_get_event_loop(p->server->wl_display);
+    wl_display_flush(p->shm_ctx.display);
+    wl_display_flush_clients(p->server->wl_display);
+    wl_event_loop_dispatch(loop, 0);
+    wl_display_flush_clients(p->server->wl_display);
+    wl_display_dispatch_pending(p->shm_ctx.display);
+
+    struct wl_resource *res = wl_client_get_object(p->wl_client, p->cal_wl_buf_id);
+    if (!res) {
+        wlr_log(WLR_ERROR, "panel: cal wl_resource id=%u not found", p->cal_wl_buf_id);
+        return NULL;
+    }
+    struct wlr_buffer *wlr_buf = wlr_buffer_try_from_resource(res);
+    if (!wlr_buf) {
+        wlr_log(WLR_ERROR, "panel: cal wlr_buffer_try_from_resource failed");
+        return NULL;
+    }
+    return wlr_buf;
+}
+
+/* Number of days in a given (proleptic Gregorian) month.
+ * month is 0-based (0 = January), matching struct tm::tm_mon. */
+static int days_in_month(int year, int month)
+{
+    static const int dim[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (month == 1) {
+        bool leap = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
+        return leap ? 29 : 28;
+    }
+    return dim[month];
+}
+
+/* Renders a small month calendar (header, weekday row, day grid) into the
+ * tooltip's Cairo surface. Today's cell is highlighted with a filled
+ * circle. Month/weekday names honour LC_TIME, same as the clock text. */
+static void panel_draw_calendar(struct tinywl_panel *p)
+{
+    if (!p->cal_memdata) return;
+
+    memset(p->cal_memdata, 0, p->cal_memsize);
+
+    cairo_surface_t *cs = cairo_image_surface_create_for_data(
+        (uint8_t *)p->cal_memdata, CAIRO_FORMAT_ARGB32,
+        CAL_TOOLTIP_W, CAL_TOOLTIP_H, p->cal_stride);
+    if (cairo_surface_status(cs) != CAIRO_STATUS_SUCCESS) {
+        cairo_surface_destroy(cs); return;
+    }
+    cairo_t *cr = cairo_create(cs);
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    cairo_set_source_rgba(cr, 0, 0, 0, 0);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+    /* Rounded card background */
+    double radius = 8.0, w = CAL_TOOLTIP_W, h = CAL_TOOLTIP_H;
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, w - radius, radius,     radius, -M_PI / 2, 0);
+    cairo_arc(cr, w - radius, h - radius, radius, 0, M_PI / 2);
+    cairo_arc(cr, radius,     h - radius, radius, M_PI / 2, M_PI);
+    cairo_arc(cr, radius,     radius,     radius, M_PI, 3 * M_PI / 2);
+    cairo_close_path(cr);
+    cairo_set_source_rgba(cr, CAL_BG_R, CAL_BG_G, CAL_BG_B, CAL_BG_A);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgba(cr, SEP_R, SEP_G, SEP_B, 0.90);
+    cairo_set_line_width(cr, 1.0);
+    cairo_stroke(cr);
+
+    time_t     rawtime = time(NULL);
+    struct tm  now_tm;
+    localtime_r(&rawtime, &now_tm);
+
+    /* Header: "Month Year" */
+    char header[64];
+    strftime(header, sizeof(header), "%B %Y", &now_tm);
+
+    cairo_text_extents_t ext;
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 13.0);
+    cairo_text_extents(cr, header, &ext);
+    double hx = (w - ext.width) / 2.0 - ext.x_bearing;
+    double hy = CAL_MARGIN + 12.0;
+    cairo_set_source_rgba(cr, TEXT_FOCUS_R, TEXT_FOCUS_G, TEXT_FOCUS_B, 1.0);
+    cairo_move_to(cr, hx, hy);
+    cairo_show_text(cr, header);
+
+    /* Weekday header row, week starting Monday */
+    double col_w      = (w - CAL_MARGIN * 2) / 7.0;
+    double grid_x0    = CAL_MARGIN;
+    double weekday_y  = CAL_MARGIN + CAL_HEADER_H;
+
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 10.0);
+    cairo_set_source_rgba(cr, TEXT_NORM_R, TEXT_NORM_G, TEXT_NORM_B, 1.0);
+
+    /* 2024-01-01 is a Monday; use it as a locale-aware weekday-name anchor */
+    struct tm anchor = {0};
+    anchor.tm_year = 124; anchor.tm_mon = 0; anchor.tm_mday = 1;
+    for (int i = 0; i < 7; i++) {
+        struct tm day_tm = anchor;
+        day_tm.tm_mday = 1 + i;
+        mktime(&day_tm);
+        char wd[8];
+        strftime(wd, sizeof(wd), "%a", &day_tm);
+        cairo_text_extents(cr, wd, &ext);
+        double cx = grid_x0 + col_w * i + (col_w - ext.width) / 2.0 - ext.x_bearing;
+        cairo_move_to(cr, cx, weekday_y + 12.0);
+        cairo_show_text(cr, wd);
+    }
+
+    /* Day grid */
+    int year  = now_tm.tm_year + 1900;
+    int month = now_tm.tm_mon;
+    int today = now_tm.tm_mday;
+
+    struct tm first_tm = {0};
+    first_tm.tm_year = now_tm.tm_year;
+    first_tm.tm_mon  = month;
+    first_tm.tm_mday = 1;
+    mktime(&first_tm);
+    int first_wday = (first_tm.tm_wday + 6) % 7; /* Sunday=0 -> Monday=0 */
+
+    int ndays = days_in_month(year, month);
+    double grid_y0 = weekday_y + CAL_WEEKDAY_H;
+
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 10.5);
+
+    for (int d = 1; d <= ndays; d++) {
+        int idx = first_wday + (d - 1);
+        int row = idx / 7;
+        int col = idx % 7;
+        double cx0 = grid_x0 + col * col_w;
+        double cy0 = grid_y0 + row * CAL_ROW_H;
+
+        bool is_today = (d == today);
+        if (is_today) {
+            double rr  = CAL_ROW_H * 0.38;
+            double ccx = cx0 + col_w / 2.0;
+            double ccy = cy0 + CAL_ROW_H / 2.0;
+            cairo_arc(cr, ccx, ccy, rr, 0, 2 * M_PI);
+            cairo_set_source_rgba(cr, TASK_FOCUS_R, TASK_FOCUS_G, TASK_FOCUS_B, TASK_FOCUS_A);
+            cairo_fill(cr);
+        }
+
+        char num[16];
+        snprintf(num, sizeof(num), "%d", d);
+        cairo_text_extents(cr, num, &ext);
+        double tx = cx0 + (col_w - ext.width) / 2.0 - ext.x_bearing;
+        double ty = cy0 + CAL_ROW_H / 2.0 + ext.height / 2.0;
+
+        if (is_today)
+            cairo_set_source_rgba(cr, TEXT_FOCUS_R, TEXT_FOCUS_G, TEXT_FOCUS_B, 1.0);
+        else
+            cairo_set_source_rgba(cr, TEXT_NORM_R, TEXT_NORM_G, TEXT_NORM_B, 1.0);
+        cairo_move_to(cr, tx, ty);
+        cairo_show_text(cr, num);
+    }
+
+    cairo_surface_flush(cs);
+    cairo_destroy(cr);
+    cairo_surface_destroy(cs);
+}
+
+/* Repaints the tooltip surface and pushes it into the scene buffer. */
+static void panel_calendar_redraw(struct tinywl_panel *p)
+{
+    if (!p->cal_text_buf || !p->cal_memdata) return;
+    panel_draw_calendar(p);
+
+    struct wl_resource *res = wl_client_get_object(p->wl_client, p->cal_wl_buf_id);
+    if (!res) return;
+
+    struct wlr_buffer *wlr_buf = wlr_buffer_try_from_resource(res);
+    if (!wlr_buf) return;
+
+    wlr_scene_buffer_set_buffer(p->cal_text_buf, wlr_buf);
+    wlr_buffer_unlock(wlr_buf);
+}
+
+/* Shows or hides the calendar tooltip. Position is recomputed on every
+ * show, right-aligned above the clock area, since it only depends on the
+ * (possibly just-resized) output width. */
+static void panel_calendar_show(struct tinywl_panel *p, bool show)
+{
+    if (!p || !p->cal_tree) return;
+
+    if (show) {
+        int x = p->out_w - CAL_TOOLTIP_W - PANEL_SPACING;
+        if (x < 0) x = 0;
+        int y = -CAL_TOOLTIP_H - 4;
+        wlr_scene_node_set_position(&p->cal_tree->node, x, y);
+        panel_calendar_redraw(p);
+    }
+    wlr_scene_node_set_enabled(&p->cal_tree->node, show);
+}
+
 /* Clock timer */
 
 static int panel_clock_tick(void *data)
@@ -509,6 +776,16 @@ static int panel_hit_task(struct tinywl_panel *p, double ox, double oy)
     return -1;
 }
 
+/* True when (ox, oy), in output-local coordinates, falls over the clock
+ * zone on the right edge of the panel. */
+static bool panel_hit_clock(struct tinywl_panel *p, double ox, double oy)
+{
+    int py = (int)oy - p->panel_y;
+    if (py < 0 || py >= PANEL_HEIGHT) return false;
+    int px = (int)ox;
+    return px >= p->out_w - CLOCK_AREA_W;
+}
+
 /* Input handlers */
 
 static void on_cursor_motion(struct wl_listener *listener, void *data)
@@ -520,6 +797,12 @@ static void on_cursor_motion(struct wl_listener *listener, void *data)
     if (p->hovered != prev) {
         panel_layout(p);
         panel_redraw(p);
+    }
+
+    bool clock_now = panel_hit_clock(p, p->server->cursor->x, p->server->cursor->y);
+    if (clock_now != p->clock_hovered) {
+        p->clock_hovered = clock_now;
+        panel_calendar_show(p, clock_now);
     }
 }
 
@@ -592,9 +875,10 @@ struct tinywl_panel *tinywl_panel_create(struct tinywl_server *server)
 {
     struct tinywl_panel *p = calloc(1, sizeof(*p));
     if (!p) { wlr_log(WLR_ERROR, "panel: out of memory"); return NULL; }
-    p->server  = server;
-    p->memfd   = -1;
-    p->hovered = -1;
+    p->server     = server;
+    p->memfd      = -1;
+    p->hovered    = -1;
+    p->cal_memfd  = -1;
 
     for (int i = 0; i < MAX_TASKS; i++) {
         wl_list_init(&p->tasks[i].set_title.link);
@@ -641,6 +925,19 @@ struct tinywl_panel *tinywl_panel_create(struct tinywl_server *server)
         panel_draw_text(p);
         p->text_buf = wlr_scene_buffer_create(p->tree, wlr_buf);
         wlr_buffer_unlock(wlr_buf);
+    }
+
+    /* Calendar tooltip — created hidden, shown on clock hover. Reuses the
+     * wl_client/wl_shm connection set up by panel_shm_upload() above. */
+    p->cal_tree = wlr_scene_tree_create(p->tree);
+    if (p->cal_tree) {
+        struct wlr_buffer *cal_buf = panel_calendar_shm_upload(p);
+        if (cal_buf) {
+            panel_draw_calendar(p);
+            p->cal_text_buf = wlr_scene_buffer_create(p->cal_tree, cal_buf);
+            wlr_buffer_unlock(cal_buf);
+        }
+        wlr_scene_node_set_enabled(&p->cal_tree->node, false);
     }
 
     /* Clock timer */
@@ -866,6 +1163,12 @@ void tinywl_panel_resize(struct tinywl_panel *p, struct tinywl_server *server)
         wlr_buffer_unlock(wlr_buf);
     }
 
+    /* The tooltip's screen position depends on out_w; force it closed
+     * rather than let it linger at a stale position until the next
+     * cursor move re-evaluates panel_hit_clock(). */
+    p->clock_hovered = false;
+    panel_calendar_show(p, false);
+
     panel_layout(p);
     panel_redraw(p);
 }
@@ -884,6 +1187,9 @@ void tinywl_panel_destroy(struct tinywl_panel *p)
     }
 
     if (p->tree)             wlr_scene_node_destroy(&p->tree->node);
+    if (p->cal_wl_buf)       wl_buffer_destroy(p->cal_wl_buf);
+    if (p->cal_memdata)      munmap(p->cal_memdata, p->cal_memsize);
+    if (p->cal_memfd >= 0)   close(p->cal_memfd);
     if (p->wl_buf)           wl_buffer_destroy(p->wl_buf);
     if (p->shm_ctx.shm)      wl_shm_destroy(p->shm_ctx.shm);
     if (p->shm_ctx.registry) wl_registry_destroy(p->shm_ctx.registry);
