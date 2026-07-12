@@ -1225,38 +1225,6 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 		return;
 	}
 
-	/*
-	 * Double-click (BTN_LEFT) on the headerbar → toggle maximize.
-	 *
-	 * The headerbar is the CSD title bar at the very top of the window.
-	 * We detect it by checking that the click's surface-local Y coordinate
-	 * (sy) is within the top HEADERBAR_HEIGHT pixels of the surface geometry.
-	 * 400 ms is the standard double-click interval.
-	 */
-#define HEADERBAR_HEIGHT 40
-#define DOUBLE_CLICK_MS  400
-	if (event->button == BTN_LEFT &&
-	    event->state  == WLR_BUTTON_PRESSED &&
-	    toplevel != NULL) {
-		struct wlr_box geo;
-		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
-		/* sy is relative to the surface; geo.y accounts for CSD shadow offset */
-		bool on_headerbar = (sy - geo.y) < HEADERBAR_HEIGHT && (sy - geo.y) >= 0;
-		uint32_t dt = event->time_msec - toplevel->last_button_time_msec;
-		bool is_double = (dt > 0 && dt <= DOUBLE_CLICK_MS);
-
-		if (on_headerbar && is_double) {
-			/* Consume the double-click — don't forward to client */
-			toplevel->last_button_time_msec = 0;
-			focus_toplevel(toplevel, surface);
-			toggle_maximize(toplevel);
-			return;
-		}
-		toplevel->last_button_time_msec = event->time_msec;
-	}
-#undef HEADERBAR_HEIGHT
-#undef DOUBLE_CLICK_MS
-
 	/* Notify the client with pointer focus that a button press has occurred */
 	wlr_seat_pointer_notify_button(server->seat,
 			event->time_msec, event->button, event->state);

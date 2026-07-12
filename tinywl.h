@@ -211,9 +211,6 @@ struct tinywl_toplevel {
     /* Dialog/Modal and Progress tracking */
     bool            is_dialog;
     bool            is_progress;
-
-    /* Double-click detection on headerbar */
-    uint32_t        last_button_time_msec;
 };
 
 struct tinywl_keyboard {
