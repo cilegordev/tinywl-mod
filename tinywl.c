@@ -32,6 +32,11 @@ void restore_toplevel(struct tinywl_toplevel *toplevel);
 /* Forward declaration for dialog stacking */
 static void raise_dialogs_to_front(struct tinywl_server *server);
 
+/* Forward declaration: needed by handle_drag_destroy before its real definition */
+static struct tinywl_toplevel *desktop_toplevel_at(
+		struct tinywl_server *server, double lx, double ly,
+		struct wlr_surface **surface, double *sx, double *sy);
+
 /* Handle SIGINT/SIGTERM by calling wl_display_terminate() so wl_display_destroy() runs and cleans up the Wayland socket files. */
 static int handle_term_signal(int signal_number, void *data) {
 	struct wl_display *display = data;
@@ -550,11 +555,35 @@ static void seat_request_start_drag(struct wl_listener *listener, void *data) {
        /* If serial is invalid, silently drop the drag request (no harm). */
 }
 
+static void handle_drag_destroy(struct wl_listener *listener, void *data) {
+       /* A drag-and-drop only reorders focus for the window where the button
+        * was first pressed (see server_cursor_button). The drop itself lands
+        * on whatever is under the cursor when the drag ends, which is often a
+        * different window (e.g. dragging from xarchive onto Thunar) and was
+        * never given focus. Without this, closing the drag source afterwards
+        * falls back to whatever was focused before the drag instead of the
+        * window the user actually just dropped onto. */
+       struct tinywl_server *server = wl_container_of(
+                       listener, server, drag_destroy);
+       wl_list_remove(&server->drag_destroy.link);
+
+       double sx, sy;
+       struct wlr_surface *surface = NULL;
+       struct tinywl_toplevel *target = desktop_toplevel_at(server,
+                       server->cursor->x, server->cursor->y, &surface, &sx, &sy);
+       if (target) {
+               focus_toplevel(target, surface);
+       }
+}
+
 static void seat_start_drag(struct wl_listener *listener, void *data) {
        /* Put the drag icon in the scene graph once the drag actually starts. */
        struct tinywl_server *server = wl_container_of(
                        listener, server, start_drag);
        struct wlr_drag *drag = data;
+
+       server->drag_destroy.notify = handle_drag_destroy;
+       wl_signal_add(&drag->events.destroy, &server->drag_destroy);
 
        if (!drag->icon) {
                return;
