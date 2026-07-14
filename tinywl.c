@@ -338,6 +338,12 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 static void handle_print_key(void) {
 	/* Print key: launch xfce4-screenshooter via fork/exec. */
 	if (fork() == 0) {
+		/* Unblock signals inherited from the compositor (see spawn_service()
+		 * in services.c for why this matters) before exec. */
+		sigset_t empty_mask;
+		sigemptyset(&empty_mask);
+		sigprocmask(SIG_SETMASK, &empty_mask, NULL);
+
 		/* Child process: exec xfce4-screenshooter */
 		execl("/usr/libexec/xfce4/screenshooter/scripts/xfce4-screenshooter",
 			"xfce4-screenshooter", (char *)NULL);
@@ -841,6 +847,12 @@ static void handle_pointer_grab_surface_destroy(struct wl_listener *listener, vo
 			listener, server, pointer_grab_surface_destroy);
 	wl_list_remove(&server->pointer_grab_surface_destroy.link);
 	server->pointer_grab_surface = NULL;
+	/* The grabbed surface vanished mid-click (e.g. a dialog closing itself on
+	 * button-press), so no release event for it will ever arrive. Without
+	 * this, pointer_button_count stays stuck > 0 forever and blocks every
+	 * future click from starting a new grab. */
+	server->pointer_button_count = 0;
+	wlr_seat_pointer_clear_focus(server->seat);
 }
 
 static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {

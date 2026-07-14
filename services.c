@@ -10,6 +10,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
+#include <dirent.h>
+#include <ctype.h>
 
 #include <wlr/util/log.h>
 
@@ -88,6 +90,16 @@ static pid_t spawn_service(const char *name, char *const argv[]) {
         return -1;
     }
     if (pid == 0) {
+        /* Unblock all signals: wl_event_loop_add_signal() blocks SIGINT/
+         * SIGTERM/SIGCHLD at the process level so it can deliver them via
+         * the wayland event loop, and fork() inherits that blocked mask.
+         * Spawned services must not inherit it — e.g. the polkit agent's
+         * own SIGCHLD-based child-watch handling breaks if SIGCHLD stays
+         * blocked, which is what caused deny clicks to hang. */
+        sigset_t empty_mask;
+        sigemptyset(&empty_mask);
+        sigprocmask(SIG_SETMASK, &empty_mask, NULL);
+
         /* Child: redirect stdout/stderr to /dev/null */
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) {
@@ -314,10 +326,69 @@ static void start_gvfs(struct tinywl_services *svc) {
 
 /* Polkit authentication agent */
 
+/* is_process_running_named: scan /proc for a process whose comm matches
+ * `name` (comm is truncated to 15 chars by the kernel, so compare only up
+ * to that length). Used to avoid spawning a second polkit agent on top of
+ * one left over from a previous session — two agents racing to answer the
+ * same authorization request is what causes the "deny does nothing /
+ * freezes" symptom, since the second one hangs waiting on a D-Bus reply
+ * for a check the first agent already resolved. */
+static bool is_process_running_named(const char *name) {
+    DIR *proc = opendir("/proc");
+    if (!proc)
+        return false;
+
+    char comm_name[16];
+    snprintf(comm_name, sizeof(comm_name), "%s", name);
+
+    struct dirent *entry;
+    bool found = false;
+    while (!found && (entry = readdir(proc)) != NULL) {
+        const char *p = entry->d_name;
+        bool all_digits = *p != '\0';
+        for (; *p; p++) {
+            if (!isdigit((unsigned char)*p)) {
+                all_digits = false;
+                break;
+            }
+        }
+        if (!all_digits)
+            continue;
+
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%s/comm", entry->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f)
+            continue;
+
+        char comm[32] = {0};
+        if (fgets(comm, sizeof(comm), f)) {
+            size_t len = strlen(comm);
+            if (len > 0 && comm[len - 1] == '\n')
+                comm[len - 1] = '\0';
+            if (strncmp(comm, comm_name, sizeof(comm_name) - 1) == 0)
+                found = true;
+        }
+        fclose(f);
+    }
+    closedir(proc);
+    return found;
+}
+
 static void start_polkit(struct tinywl_services *svc) {
     char *agent = find_polkit_agent();
     if (!agent) {
         wlr_log(WLR_INFO, "services: no polkit authentication agent found, skipping");
+        return;
+    }
+
+    /* basename of the agent path, truncated the same way /proc/PID/comm is */
+    const char *base = strrchr(agent, '/');
+    base = base ? base + 1 : agent;
+    if (is_process_running_named(base)) {
+        wlr_log(WLR_INFO, "services: a polkit authentication agent is already "
+                "running, not starting a second one");
+        free(agent);
         return;
     }
 
