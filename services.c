@@ -82,6 +82,28 @@ static void record_pid(struct tinywl_services *svc, pid_t pid, const char *name)
     svc->count++;
 }
 
+/* tinywl_services_try_reap: reap only PIDs we recorded ourselves. Called from
+ * the compositor's SIGCHLD handler. Deliberately targeted (waitpid on each
+ * known pid) rather than waitpid(-1, ...), which would also reap children
+ * other subsystems own (e.g. wlroots forks and waits on its own Xwayland
+ * child; a blanket wait races with that and makes wlroots think Xwayland
+ * died, tearing the whole X11 connection down). */
+void tinywl_services_try_reap(struct tinywl_services *svc) {
+    if (!svc)
+        return;
+    for (int i = 0; i < svc->count; i++) {
+        if (svc->entries[i].pid <= 0)
+            continue;
+        int status;
+        pid_t r = waitpid(svc->entries[i].pid, &status, WNOHANG);
+        if (r == svc->entries[i].pid) {
+            /* Reaped; stop tracking so a later call doesn't wait on a
+             * potentially-recycled pid. */
+            svc->entries[i].pid = -1;
+        }
+    }
+}
+
 /* spawn_service: fork+exec argv (NULL-terminated). Returns the child PID, or -1 on failure. */
 static pid_t spawn_service(const char *name, char *const argv[]) {
     pid_t pid = fork();

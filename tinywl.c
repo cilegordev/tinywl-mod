@@ -48,11 +48,13 @@ static int handle_term_signal(int signal_number, void *data) {
 /* Reap zombie children left behind by forked helpers (menu launcher, screenshot tool, startup_cmd). */
 static int handle_sigchld(int signal_number, void *data) {
 	(void) signal_number;
-	(void) data;
-	pid_t pid;
-	while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) {
-		/* Reaped pid; nothing else to do. */
-	}
+	struct tinywl_server *server = data;
+	/* Only reap PIDs we recorded ourselves (see tinywl_services_try_reap()).
+	 * Do NOT waitpid(-1, ...) here: wlroots forks and waits on its own
+	 * Xwayland child, and a blanket wait races with that, making wlroots
+	 * think Xwayland exited when it didn't (breaks XWayland entirely). */
+	if (server)
+		tinywl_services_try_reap(server->services);
 	return 1;
 }
 
@@ -1937,7 +1939,8 @@ int main(int argc, char *argv[]) {
 	struct wl_event_loop *term_loop = wl_display_get_event_loop(server.wl_display);
 	wl_event_loop_add_signal(term_loop, SIGINT, handle_term_signal, server.wl_display);
 	wl_event_loop_add_signal(term_loop, SIGTERM, handle_term_signal, server.wl_display);
-	wl_event_loop_add_signal(term_loop, SIGCHLD, handle_sigchld, NULL);
+	/* SIGCHLD is registered later, after XWayland has been started (see
+	 * tinywl_services_init() below) — see the comment there for why. */
 
 	/* Autocreate the backend for the current environment. */
 	server.backend = wlr_backend_autocreate(server.wl_display, NULL);
@@ -2094,6 +2097,15 @@ int main(int argc, char *argv[]) {
 		wlr_log(WLR_ERROR, "Failed to initialise background services");
 		/* Non-fatal: compositor runs fine without them */
 	}
+
+	/* Registered here, not earlier: wl_event_loop_add_signal() blocks SIGCHLD
+	 * in this process's signal mask, and every fork() after that point
+	 * inherits the block — including wlroots' own internal fork of the
+	 * Xwayland process (started just above, inside tinywl_services_init()).
+	 * Registering it before Xwayland starts left Xwayland with SIGCHLD
+	 * blocked, breaking its own child handling and making wlroots' own
+	 * waitpid() on it fail with ECHILD. */
+	wl_event_loop_add_signal(term_loop, SIGCHLD, handle_sigchld, &server);
 
 	/* Load the wallpaper; must run after the backend starts and WAYLAND_DISPLAY is set. */
 	server.background = tinywl_background_create(&server);
