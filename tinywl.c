@@ -1232,7 +1232,10 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	/* Called when the surface is mapped, or ready to display on-screen. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, map);
 
-	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+	/* Insert at the tail, not the head: this list doubles as focus-recency
+	 * order, and windows that skip focus_toplevel() (e.g. progress dialogs)
+	 * must not be mistaken for the most-recently-focused window later. */
+	wl_list_insert(toplevel->server->toplevels.prev, &toplevel->link);
 
 	/* Try to load saved window state based on app_id */
 	bool state_loaded = false;

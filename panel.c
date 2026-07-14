@@ -893,17 +893,10 @@ static void on_cursor_button(struct wl_listener *listener, void *data)
         /* Clicking the already-focused window's taskbar button minimizes it (toggle behaviour). */
         tinywl_panel_minimize_toplevel(p, tl);
     } else {
-        /* Raise and focus the non-minimized window */
-        wlr_scene_node_raise_to_top(&tl->scene_tree->node);
-        tinywl_panel_raise_to_top(p);
-        struct wlr_surface *surface = tl->xdg_toplevel->base->surface;
-        struct wlr_keyboard *kb = wlr_seat_get_keyboard(p->server->seat);
-        wlr_xdg_toplevel_set_activated(tl->xdg_toplevel, true);
-        if (kb)
-            wlr_seat_keyboard_notify_enter(p->server->seat, surface,
-                                            kb->keycodes, kb->num_keycodes,
-                                            &kb->modifiers);
-        tinywl_panel_on_focus(p, tl);
+        /* Not minimized: go through the same callback restore_toplevel()
+         * uses, so this goes through focus_toplevel() too (deactivates the
+         * previous window and keeps server->toplevels' focus order correct). */
+        tinywl_panel_restore_toplevel(p, tl);
     }
 }
 
