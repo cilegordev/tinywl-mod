@@ -337,9 +337,10 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 	return true;
 }
 
-static void handle_print_key(void) {
+static void handle_print_key(struct tinywl_server *server) {
 	/* Print key: launch xfce4-screenshooter via fork/exec. */
-	if (fork() == 0) {
+	pid_t pid = fork();
+	if (pid == 0) {
 		/* Unblock signals inherited from the compositor (see spawn_service()
 		 * in services.c for why this matters) before exec. */
 		sigset_t empty_mask;
@@ -352,7 +353,9 @@ static void handle_print_key(void) {
 		/* If exec fails, exit quietly */
 		exit(1);
 	}
-	/* Parent continues without waiting */
+	/* Parent: track the pid so it gets reaped instead of becoming a zombie. */
+	if (pid > 0 && server)
+		tinywl_services_track_pid(server->services, pid, "xfce4-screenshooter");
 }
 
 static void keyboard_handle_key(
@@ -378,7 +381,7 @@ static void keyboard_handle_key(
 	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		for (int i = 0; i < nsyms; i++) {
 			if (syms[i] == XKB_KEY_Print) {
-				handle_print_key();
+				handle_print_key(server);
 				handled = true;
 				break;
 			}

@@ -19,6 +19,12 @@ void tinywl_services_destroy(struct tinywl_services *svc);
  * under them, making them think their child died unexpectedly. */
 void tinywl_services_try_reap(struct tinywl_services *svc);
 
+/* Register an ad-hoc forked child (e.g. an app launched from the menu, or
+ * the Print-key screenshot helper) so tinywl_services_try_reap() will also
+ * reap it. Without this, any child forked outside services.c is invisible
+ * to the reaper and becomes a permanent zombie once it exits. */
+void tinywl_services_track_pid(struct tinywl_services *svc, pid_t pid, const char *name);
+
 /* True if `backend` is (or, wrapped in a multi-backend, contains) a nested X11/Wayland backend rather than real DRM/KMS. */
 bool tinywl_backend_is_nested(struct wlr_backend *backend);
 

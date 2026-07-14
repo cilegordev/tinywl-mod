@@ -8,6 +8,7 @@
 
 #include "menu.h"
 #include "tinywl.h"
+#include "services.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -128,10 +129,12 @@ struct tinywl_menu {
 };
 
 /* Helpers */
-static void do_exec(const char *c) {
+static void do_exec(struct tinywl_server *server, const char *c) {
     if (!c) return;
     pid_t p = fork();
     if (p==0){setsid();execl("/bin/sh","/bin/sh","-c",c,(char*)NULL);_exit(127);}
+    if (p > 0 && server)
+        tinywl_services_track_pid(server->services, p, c);
 }
 static inline int clampi(int v,int lo,int hi){return v<lo?lo:v>hi?hi:v;}
 
@@ -387,7 +390,7 @@ static void menu_activate(struct tinywl_menu *m, int idx) {
     switch (ITEMS[idx].type) {
     case ITEM_TITLE: break;
     case ITEM_EXEC:
-        do_exec(ITEMS[idx].cmd); break;
+        do_exec(m->server, ITEMS[idx].cmd); break;
     case ITEM_QUIT:
         wl_display_terminate(m->server->wl_display); break;
     }

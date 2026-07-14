@@ -46,7 +46,7 @@ bool tinywl_backend_is_nested(struct wlr_backend *backend) {
 #include "services.h"
 
 /* Maximum number of services we track */
-#define MAX_SERVICES 16
+#define MAX_SERVICES 32
 
 struct service_entry {
     pid_t   pid;
@@ -73,12 +73,24 @@ struct tinywl_services {
  * record_pid – store a child PID so we can kill it on shutdown.
  */
 static void record_pid(struct tinywl_services *svc, pid_t pid, const char *name) {
+    /* Reuse a freed slot (already reaped, pid <= 0) if one exists, so
+     * short-lived ad-hoc entries (menu-launched apps, screenshots) don't
+     * permanently eat into the fixed-size pool. */
+    for (int i = 0; i < svc->count; i++) {
+        if (svc->entries[i].pid <= 0) {
+            svc->entries[i].pid = pid;
+            strncpy(svc->entries[i].name, name, sizeof(svc->entries[i].name) - 1);
+            svc->entries[i].name[sizeof(svc->entries[i].name) - 1] = '\0';
+            return;
+        }
+    }
     if (svc->count >= MAX_SERVICES) {
         wlr_log(WLR_ERROR, "services: too many tracked processes, cannot record %s", name);
         return;
     }
     svc->entries[svc->count].pid = pid;
     strncpy(svc->entries[svc->count].name, name, sizeof(svc->entries[0].name) - 1);
+    svc->entries[svc->count].name[sizeof(svc->entries[0].name) - 1] = '\0';
     svc->count++;
 }
 
@@ -102,6 +114,12 @@ void tinywl_services_try_reap(struct tinywl_services *svc) {
             svc->entries[i].pid = -1;
         }
     }
+}
+
+void tinywl_services_track_pid(struct tinywl_services *svc, pid_t pid, const char *name) {
+    if (!svc || pid <= 0)
+        return;
+    record_pid(svc, pid, name ? name : "ad-hoc");
 }
 
 /* spawn_service: fork+exec argv (NULL-terminated). Returns the child PID, or -1 on failure. */
