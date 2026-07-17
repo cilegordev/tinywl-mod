@@ -12,6 +12,7 @@
 #include <time.h>
 #include <dirent.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include <wlr/util/log.h>
 
@@ -395,7 +396,7 @@ static bool is_process_running_named(const char *name) {
         if (!all_digits)
             continue;
 
-        char path[64];
+        char path[6 + NAME_MAX + 5 + 1]; /* "/proc/" + d_name + "/comm" + NUL */
         snprintf(path, sizeof(path), "/proc/%s/comm", entry->d_name);
         FILE *f = fopen(path, "r");
         if (!f)
