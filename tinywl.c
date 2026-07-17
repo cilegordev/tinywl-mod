@@ -41,6 +41,7 @@ static struct tinywl_toplevel *desktop_toplevel_at(
 static int handle_term_signal(int signal_number, void *data) {
 	struct wl_display *display = data;
 	wlr_log(WLR_INFO, "Received signal %d, shutting down", signal_number);
+	fflush(NULL); /* diagnostic: force this line to disk even if something downstream hangs/gets SIGKILLed */
 	wl_display_terminate(display);
 	return 0;
 }
@@ -2143,10 +2144,9 @@ int main(int argc, char *argv[]) {
 	 */
 	cleanup_wayland_socket_files();
 
-	/* Once wl_display_run returns, we destroy all clients then shut down the
-	 * server. */
-	wl_display_destroy_clients(server.wl_display);
+	/* Destroy background services (including XWayland) BEFORE shutdown */
 	tinywl_services_destroy(server.services);
+	wl_display_destroy_clients(server.wl_display);
 	tinywl_panel_destroy(server.panel);
 	tinywl_background_destroy(server.background);
 	tinywl_menu_destroy(server.menu);
