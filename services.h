@@ -5,6 +5,7 @@
 
 struct tinywl_server;
 struct wlr_backend;
+struct wlr_xwayland;
 
 struct tinywl_services;
 
@@ -27,5 +28,10 @@ void tinywl_services_track_pid(struct tinywl_services *svc, pid_t pid, const cha
 
 /* True if `backend` is (or, wrapped in a multi-backend, contains) a nested X11/Wayland backend rather than real DRM/KMS. */
 bool tinywl_backend_is_nested(struct wlr_backend *backend);
+
+/* Returns the wlr_xwayland instance owned by these services (or NULL if
+ * XWayland isn't running), so the caller can hook its own listeners
+ * (e.g. events.new_surface) onto it. */
+struct wlr_xwayland *tinywl_services_get_xwayland(struct tinywl_services *svc);
 
 #endif
