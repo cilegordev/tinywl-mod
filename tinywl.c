@@ -1835,6 +1835,7 @@ static void xwayland_surface_unmap(struct wl_listener *listener, void *data) {
 
 	if (!xsurface->override_redirect) {
 		wl_list_remove(&toplevel->link);
+		wl_list_init(&toplevel->link);
 	}
 
 	if (toplevel->scene_tree) {
@@ -1883,6 +1884,20 @@ static void xwayland_surface_dissociate(struct wl_listener *listener, void *data
 static void xwayland_surface_destroy(struct wl_listener *listener, void *data) {
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 
+	/* Defensive cleanup: normally unmap already did this, but if this
+	 * surface is destroyed while still mapped (e.g. wlr_xwayland_destroy()
+	 * tearing everything down at once during shutdown) unmap may never
+	 * fire. Leaving a dangling scene node / toplevels-list entry here is
+	 * exactly what caused the 45s shutdown hang before — a later click or
+	 * cleanup pass would touch a freed toplevel. */
+	if (toplevel->link.next != &toplevel->link) {
+		wl_list_remove(&toplevel->link);
+	}
+	if (toplevel->scene_tree) {
+		wlr_scene_node_destroy(&toplevel->scene_tree->node);
+		toplevel->scene_tree = NULL;
+	}
+
 	wl_list_remove(&toplevel->xwayland_associate.link);
 	wl_list_remove(&toplevel->xwayland_dissociate.link);
 	wl_list_remove(&toplevel->xwayland_request_configure.link);
@@ -1914,6 +1929,13 @@ static void xwayland_surface_request_maximize(struct wl_listener *listener, void
 		wl_container_of(listener, toplevel, request_maximize);
 	struct wlr_xwayland_surface *xsurface = toplevel->xwayland_surface;
 	struct tinywl_server *server = toplevel->server;
+
+	if (!toplevel->scene_tree) {
+		/* Not mapped yet (e.g. client requests "start maximized" before its
+		 * window is ever shown) — nothing to resize/reposition yet. */
+		return;
+	}
+
 	bool want_maximized = xsurface->maximized_horz && xsurface->maximized_vert;
 
 	if (want_maximized == toplevel->maximized) {
@@ -1958,6 +1980,12 @@ static void xwayland_surface_request_fullscreen(struct wl_listener *listener, vo
 		wl_container_of(listener, toplevel, request_fullscreen);
 	struct wlr_xwayland_surface *xsurface = toplevel->xwayland_surface;
 	struct tinywl_server *server = toplevel->server;
+
+	if (!toplevel->scene_tree) {
+		/* Not mapped yet — see the matching guard in request_maximize. */
+		return;
+	}
+
 	bool want_fullscreen = xsurface->fullscreen;
 
 	if (want_fullscreen == toplevel->fullscreen) {
@@ -2034,6 +2062,10 @@ static void begin_interactive(struct tinywl_toplevel *toplevel,
 	/* This function sets up an interactive move or resize operation, where the
 	 * compositor stops propegating pointer events to clients and instead
 	 * consumes them itself, to move or resize windows. */
+	if (!toplevel->scene_tree) {
+		/* Not mapped yet — nothing to move/resize. */
+		return;
+	}
 	struct tinywl_server *server = toplevel->server;
 	struct wlr_surface *focused_surface =
 		server->seat->pointer_state.focused_surface;
