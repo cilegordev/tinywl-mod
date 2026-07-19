@@ -223,9 +223,19 @@ static bool panel_hit_clock(struct tinywl_panel *p, double ox, double oy);
 static const char *task_label(const struct panel_task *t)
 {
     if (!t->toplevel) return "?";
-    struct wlr_xdg_toplevel *xt = t->toplevel->xdg_toplevel;
-    if (xt->title  && xt->title[0])  return xt->title;
-    if (xt->app_id && xt->app_id[0]) return xt->app_id;
+
+    /* xdg-shell and XWayland store title/class in different places. */
+    if (t->toplevel->xdg_toplevel) {
+        struct wlr_xdg_toplevel *xt = t->toplevel->xdg_toplevel;
+        if (xt->title  && xt->title[0])  return xt->title;
+        if (xt->app_id && xt->app_id[0]) return xt->app_id;
+#ifdef TINYWL_HAS_XWAYLAND
+    } else if (t->toplevel->xwayland_surface) {
+        struct wlr_xwayland_surface *xs = t->toplevel->xwayland_surface;
+        if (xs->title && xs->title[0]) return xs->title;
+        if (xs->class && xs->class[0]) return xs->class;
+#endif
+    }
     return "?";
 }
 
@@ -1017,10 +1027,16 @@ void tinywl_panel_on_map(struct tinywl_panel *p, struct tinywl_toplevel *topleve
     t->x = 0; t->w = 0;
 
     t->set_title.notify = on_task_set_title;
-    wl_signal_add(&toplevel->xdg_toplevel->events.set_title, &t->set_title);
-
     t->destroy.notify = on_task_destroy;
-    wl_signal_add(&toplevel->xdg_toplevel->base->events.destroy, &t->destroy);
+    if (toplevel->xdg_toplevel) {
+        wl_signal_add(&toplevel->xdg_toplevel->events.set_title, &t->set_title);
+        wl_signal_add(&toplevel->xdg_toplevel->base->events.destroy, &t->destroy);
+#ifdef TINYWL_HAS_XWAYLAND
+    } else if (toplevel->xwayland_surface) {
+        wl_signal_add(&toplevel->xwayland_surface->events.set_title, &t->set_title);
+        wl_signal_add(&toplevel->xwayland_surface->events.destroy, &t->destroy);
+#endif
+    }
 
     /* New task's physical index is always the current n_tasks; append it
      * as the new rightmost visual slot. */
@@ -1064,12 +1080,20 @@ void tinywl_panel_on_unmap(struct tinywl_panel *p, struct tinywl_toplevel *tople
         p->tasks[i].w        = p->tasks[i + 1].w;
 
         p->tasks[i].set_title.notify = on_task_set_title;
-        wl_signal_add(&moved_toplevel->xdg_toplevel->events.set_title,
-                      &p->tasks[i].set_title);
-
         p->tasks[i].destroy.notify = on_task_destroy;
-        wl_signal_add(&moved_toplevel->xdg_toplevel->base->events.destroy,
-                      &p->tasks[i].destroy);
+        if (moved_toplevel->xdg_toplevel) {
+            wl_signal_add(&moved_toplevel->xdg_toplevel->events.set_title,
+                          &p->tasks[i].set_title);
+            wl_signal_add(&moved_toplevel->xdg_toplevel->base->events.destroy,
+                          &p->tasks[i].destroy);
+#ifdef TINYWL_HAS_XWAYLAND
+        } else if (moved_toplevel->xwayland_surface) {
+            wl_signal_add(&moved_toplevel->xwayland_surface->events.set_title,
+                          &p->tasks[i].set_title);
+            wl_signal_add(&moved_toplevel->xwayland_surface->events.destroy,
+                          &p->tasks[i].destroy);
+#endif
+        }
 
         wl_list_init(&p->tasks[i + 1].set_title.link);
         wl_list_init(&p->tasks[i + 1].destroy.link);

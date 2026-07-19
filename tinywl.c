@@ -338,8 +338,24 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface 
 	tinywl_panel_on_focus(server->panel, toplevel);
 	/* Give the surface keyboard focus through the seat. */
 	if (keyboard != NULL) {
+		/* Tab may still be physically down mid Alt+Tab, but we never forward
+		 * its press/release to clients — so exclude it here too, or XWayland
+		 * clients (e.g. Chrome) auto-repeat it forever since they never see
+		 * the release. */
+		uint32_t filtered[32];
+		size_t nfiltered = 0;
+		for (size_t i = 0; i < keyboard->num_keycodes && nfiltered < 32; i++) {
+			uint32_t kc = keyboard->keycodes[i];
+			const xkb_keysym_t *syms;
+			int n = xkb_state_key_get_syms(keyboard->xkb_state, kc + 8, &syms);
+			bool is_tab = false;
+			for (int j = 0; j < n; j++) {
+				if (syms[j] == XKB_KEY_Tab) { is_tab = true; break; }
+			}
+			if (!is_tab) filtered[nfiltered++] = kc;
+		}
 		wlr_seat_keyboard_notify_enter(seat, toplevel_wlr_surface(toplevel),
-			keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
+			filtered, nfiltered, &keyboard->modifiers);
 	}
 }
 
@@ -403,7 +419,7 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 		}
 		struct tinywl_toplevel *next_toplevel =
 			wl_container_of(server->toplevels.prev, next_toplevel, link);
-		focus_toplevel(next_toplevel, next_toplevel->xdg_toplevel->base->surface);
+		focus_toplevel(next_toplevel, toplevel_wlr_surface(next_toplevel));
 		break;
 	default:
 		return false;
@@ -1790,7 +1806,13 @@ static void xwayland_surface_map(struct wl_listener *listener, void *data) {
 	}
 	wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
 
-	if (!xsurface->override_redirect) {
+	/* Skip invisible helper windows (WM_HINTS.input=False) from Alt+Tab/taskbar. */
+	bool wants_focus = true;
+	if (xsurface->hints && (xsurface->hints->flags & XCB_ICCCM_WM_HINT_INPUT)) {
+		wants_focus = xsurface->hints->input;
+	}
+
+	if (!xsurface->override_redirect && wants_focus) {
 		/*
 		 * Only non-override-redirect windows are focusable toplevels (node.data set,
 		 * inserted into server->toplevels). Override-redirect windows (popup menus)
@@ -1803,6 +1825,10 @@ static void xwayland_surface_map(struct wl_listener *listener, void *data) {
 		 * pattern: only focus_toplevel() should promote a toplevel to the
 		 * front of the focus-order list. */
 		wl_list_insert(server->toplevels.prev, &toplevel->link);
+
+		/* Register this window in the taskbar (was previously skipped for
+		 * XWayland clients such as Chrome, so they never appeared in the panel). */
+		tinywl_panel_on_map(server->panel, toplevel);
 		focus_toplevel(toplevel, xsurface->surface);
 	}
 }
@@ -1820,6 +1846,7 @@ static void xwayland_surface_unmap(struct wl_listener *listener, void *data) {
 			toplevel_wlr_surface(toplevel);
 
 	if (!xsurface->override_redirect) {
+		tinywl_panel_on_unmap(server->panel, toplevel);
 		wl_list_remove(&toplevel->link);
 		wl_list_init(&toplevel->link);
 	}
