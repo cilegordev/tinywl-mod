@@ -1,8 +1,3 @@
-/*
- * window-state.c: persists window state to ~/.config/tinywl/windows.state as
- * app_id|maximized|x|y|width|height|minimized|fullscreen.
- */
-
 #define _POSIX_C_SOURCE 200112L
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,7 +68,8 @@ void save_window_state(struct tinywl_toplevel *toplevel) {
 	bool minimized = toplevel->minimized;
 	bool fullscreen = toplevel->fullscreen;
 
-	/* Called after unmap, when geometry can legitimately read back as 0x0; skip saving rather than overwrite a valid saved size with garbage. */
+	/* Called after unmap, when geometry can legitimately read back as 0x0; 
+	skip saving rather than overwrite a valid saved size with garbage. */
 	if (width <= 0 || height <= 0) {
 		return;
 	}

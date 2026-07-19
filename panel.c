@@ -1,7 +1,6 @@
-/*
- * panel.c: Weston-style bottom taskbar. Left zone lists open windows (click to focus/raise, highlighted when focused);
- * right zone shows a live clock. Rendered via the scene graph plus a Cairo text overlay uploaded through wl_shm.
- * tinywl.c calls tinywl_panel_on_map/on_unmap/on_focus to keep it in sync.
+/* 
+ * panel.c: bottom taskbar; left zone lists windows, right zone shows a clock. 
+ * Synced from tinywl.c via tinywl_panel_on_map/on_unmap/on_focus. 
  */
 
 #define _GNU_SOURCE
@@ -1049,9 +1048,9 @@ void tinywl_panel_on_unmap(struct tinywl_panel *p, struct tinywl_toplevel *tople
     wl_list_init(&p->tasks[found].set_title.link);
     wl_list_init(&p->tasks[found].destroy.link);
 
-    /*
-     * Shift remaining tasks down by unregistering/re-registering each wl_listener at its new address, rather than copying
-     * the struct by value, since copying leaves the owning wl_signal pointing at the old (stale) address.
+    /* 
+     * Shift tasks down by re-registering each wl_listener at its new address; 
+     * copying the struct would leave the wl_signal pointing at a stale address. 
      */
     for (int i = found; i < p->n_tasks - 1; i++) {
         struct tinywl_toplevel *moved_toplevel = p->tasks[i + 1].toplevel;

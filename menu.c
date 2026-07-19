@@ -1,6 +1,6 @@
-/*
- * menu.c: right-click popup menu. Row backgrounds via wlr_scene_rect, text via a Cairo/wl_shm overlay,
- * uploaded through a non-blocking internal Wayland client (no roundtrip). Falls back to rects-only if the buffer fails.
+/* 
+ * menu.c: right-click popup menu, rows via wlr_scene_rect, 
+ * text via a Cairo/wl_shm overlay. 
  */
 
 #define _GNU_SOURCE

@@ -55,10 +55,10 @@ static int handle_term_signal(int signal_number, void *data) {
 static int handle_sigchld(int signal_number, void *data) {
 	(void) signal_number;
 	struct tinywl_server *server = data;
-	/* Only reap PIDs we recorded ourselves (see tinywl_services_try_reap()).
-	 * Do NOT waitpid(-1, ...) here: wlroots forks and waits on its own
-	 * Xwayland child, and a blanket wait races with that, making wlroots
-	 * think Xwayland exited when it didn't (breaks XWayland entirely). */
+	/* 
+	 * Only reap PIDs we recorded ourselves; never waitpid(-1, ...) here, 
+	 * or it races with wlroots' own Xwayland child reaping and breaks XWayland. 
+	 */
 	if (server)
 		tinywl_services_try_reap(server->services);
 	return 1;
@@ -226,10 +226,7 @@ static void popup_handle_map(struct wl_listener *listener, void *data) {
 	raise_popup_owner_above_panel(popup);
 }
 
-/* Returns the underlying wlr_surface for either an xdg-shell or an
- * XWayland-backed toplevel. Shared code that doesn't care which protocol
- * a toplevel came from should go through this instead of assuming
- * ->xdg_toplevel directly. */
+/* Get the wlr_surface for either an xdg-shell or an XWayland toplevel. */
 static struct wlr_surface *toplevel_wlr_surface(struct tinywl_toplevel *toplevel) {
 	if (!toplevel) {
 		return NULL;
@@ -255,9 +252,11 @@ static void toplevel_set_activated(struct tinywl_toplevel *toplevel, bool activa
 	}
 }
 
-/* Returns the toplevel's content geometry regardless of protocol. XWayland
+/* 
+ * Returns the toplevel's content geometry regardless of protocol. XWayland
  * surfaces have no separate "geometry offset" concept the way xdg-shell
- * does, so it's just (0, 0, width, height). */
+ * does, so it's just (0, 0, width, height). 
+ */
 static void toplevel_get_geometry(struct tinywl_toplevel *toplevel, struct wlr_box *box) {
 	if (toplevel->xdg_toplevel) {
 		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, box);
@@ -271,10 +270,10 @@ static void toplevel_get_geometry(struct tinywl_toplevel *toplevel, struct wlr_b
 	}
 }
 
-/* Resizes a toplevel regardless of protocol. Assumes the scene node's
- * position has already been set to where the toplevel should end up —
- * XWayland's configure call needs position and size together, unlike
- * xdg-shell's set_size, which only ever negotiates size. */
+/* 
+ * Resize a toplevel regardless of protocol; assumes the scene node position is already 
+ * set (XWayland needs position+size together, xdg-shell only negotiates size). 
+ */
 static void toplevel_set_size(struct tinywl_toplevel *toplevel, int width, int height) {
 	if (width < 1) width = 1;
 	if (height < 1) height = 1;
@@ -346,8 +345,10 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface 
 
 static void keyboard_handle_modifiers(
 		struct wl_listener *listener, void *data) {
-	/* This event is raised when a modifier key, such as shift or alt, is
-	 * pressed. We simply communicate this to the client. */
+	/* 
+	 * This event is raised when a modifier key, such as shift or alt, is
+	 * pressed. We simply communicate this to the client. 
+	 */
 	struct tinywl_keyboard *keyboard =
 		wl_container_of(listener, keyboard, modifiers);
 	/* A seat has only one keyboard slot; swap the underlying wlr_keyboard as devices change. */
@@ -640,13 +641,7 @@ static void seat_request_start_drag(struct wl_listener *listener, void *data) {
 }
 
 static void handle_drag_destroy(struct wl_listener *listener, void *data) {
-       /* A drag-and-drop only reorders focus for the window where the button
-        * was first pressed (see server_cursor_button). The drop itself lands
-        * on whatever is under the cursor when the drag ends, which is often a
-        * different window (e.g. dragging from xarchive onto Thunar) and was
-        * never given focus. Without this, closing the drag source afterwards
-        * falls back to whatever was focused before the drag instead of the
-        * window the user actually just dropped onto. */
+       /* On drag-and-drop, refocus the surface actually dropped onto, not the drag source, so closing the source afterwards doesn't fall back to stale focus. */
        struct tinywl_server *server = wl_container_of(
                        listener, server, drag_destroy);
        wl_list_remove(&server->drag_destroy.link);
@@ -925,10 +920,10 @@ static void handle_pointer_grab_surface_destroy(struct wl_listener *listener, vo
 			listener, server, pointer_grab_surface_destroy);
 	wl_list_remove(&server->pointer_grab_surface_destroy.link);
 	server->pointer_grab_surface = NULL;
-	/* The grabbed surface vanished mid-click (e.g. a dialog closing itself on
-	 * button-press), so no release event for it will ever arrive. Without
-	 * this, pointer_button_count stays stuck > 0 forever and blocks every
-	 * future click from starting a new grab. */
+	/* 
+	 * The grabbed surface can vanish mid-click with no release event; 
+	 * reset pointer_button_count here or future clicks stay blocked. 
+	 */
 	server->pointer_button_count = 0;
 	wlr_seat_pointer_clear_focus(server->seat);
 }
@@ -1707,17 +1702,12 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	free(toplevel);
 }
 
-/* --- XWayland toplevel support ---
- * X11 apps (via XWayland) were previously never given a scene node at all:
- * their wlr_surface was created but nothing ever displayed it, so the
- * process ran (visible in ps/htop) with no window ever appearing on
- * screen. This mirrors the xdg_toplevel_map/unmap/destroy handling above,
- * scoped down to the essentials: the window becomes visible, focusable,
- * closable, and participates in the shared focus-fallback list. It does
- * NOT (yet) get taskbar entries, saved window state, or interactive
- * move/resize/maximize/fullscreen via keybinds/CSD — those all assume
- * xdg-shell-specific protocol requests that XWayland surfaces don't send
- * through this code path. */
+/*
+ * XWayland toplevel support: mirrors the xdg_toplevel map/unmap/destroy
+ * handling above so X11 windows actually get a scene node and become
+ * visible/focusable/closable. Taskbar entries, saved state, and CSD-driven
+ * move/resize/maximize are xdg-shell-only and not covered here.
+ */
 
 static void xwayland_surface_request_configure(struct wl_listener *listener, void *data) {
 	struct tinywl_toplevel *toplevel =
@@ -1735,10 +1725,10 @@ static void xwayland_surface_request_configure(struct wl_listener *listener, voi
 		struct wlr_box out_box;
 		int out_w, out_h;
 		if (get_primary_output_box(server, &out_box, &out_w, &out_h)) {
-			/* Clamp to the usable area, same as the initial map — otherwise
-			 * a client resizing/maximizing itself (Chrome implements its own
-			 * maximize button via a configure request, not necessarily
-			 * request_maximize) can push itself off-screen again. */
+			/* 
+			 * Clamp to the usable area, same as the initial map, 
+			 * so a client resizing/maximizing itself doesn't push itself off-screen. 
+			 */
 			int panel_height = tinywl_panel_get_height(server->panel);
 			int max_width = out_w - 40;
 			int max_height = out_h - panel_height - 40;
@@ -1773,11 +1763,10 @@ static void xwayland_surface_map(struct wl_listener *listener, void *data) {
 		struct wlr_box out_box;
 		int out_w, out_h;
 		if (get_primary_output_box(server, &out_box, &out_w, &out_h)) {
-			/* Constrain the window to fit on screen, the same way
-			 * xdg_toplevel_map does for dialogs — otherwise a client asking
-			 * for a size taller/wider than the output pushes the window
-			 * off-screen once centered, clipping its top edge (title bar,
-			 * tab strip, "new tab" button, etc.) above y=0. */
+			/* 
+			 * Constrain to fit on screen like xdg_toplevel_map does for dialogs, 
+			 * so a client requesting an oversized window doesn't clip off-screen once centered. 
+			 */
 			int panel_height = tinywl_panel_get_height(server->panel);
 			int max_width = out_w - 40;
 			int max_height = out_h - panel_height - 40;
@@ -1802,16 +1791,13 @@ static void xwayland_surface_map(struct wl_listener *listener, void *data) {
 	wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
 
 	if (!xsurface->override_redirect) {
-		/* Only non-override-redirect windows are focusable toplevels: only
-		 * for those do we set node.data (what desktop_toplevel_at() uses to
-		 * resolve a click back to a tinywl_toplevel) and insert into
-		 * server->toplevels. Override-redirect windows (dropdown/context
-		 * menus) get a scene node so they're visible, but must stay
-		 * click-through for focus purposes — their ->link is deliberately
-		 * never inserted into any list, so letting desktop_toplevel_at()
-		 * resolve to them and then calling focus_toplevel() on them (which
-		 * does wl_list_remove(&toplevel->link)) would corrupt/crash on an
-		 * uninitialized list node. */
+		/*
+		 * Only non-override-redirect windows are focusable toplevels (node.data set,
+		 * inserted into server->toplevels). Override-redirect windows (popup menus)
+		 * get a scene node but stay click-through: their ->link is never inserted,
+		 * so resolving a click to them and calling focus_toplevel() would corrupt
+		 * an uninitialized list node.
+		 */
 		toplevel->scene_tree->node.data = toplevel;
 		/* Tail, not head — see the xdg_toplevel_map comment on the same
 		 * pattern: only focus_toplevel() should promote a toplevel to the
@@ -1884,12 +1870,7 @@ static void xwayland_surface_dissociate(struct wl_listener *listener, void *data
 static void xwayland_surface_destroy(struct wl_listener *listener, void *data) {
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 
-	/* Defensive cleanup: normally unmap already did this, but if this
-	 * surface is destroyed while still mapped (e.g. wlr_xwayland_destroy()
-	 * tearing everything down at once during shutdown) unmap may never
-	 * fire. Leaving a dangling scene node / toplevels-list entry here is
-	 * exactly what caused the 45s shutdown hang before — a later click or
-	 * cleanup pass would touch a freed toplevel. */
+	/* Defensive cleanup: unmap may never fire if the surface is destroyed while still mapped (e.g. wlr_xwayland_destroy() during shutdown); leaving a dangling scene node/list entry caused shutdown hangs. */
 	if (toplevel->link.next != &toplevel->link) {
 		wl_list_remove(&toplevel->link);
 	}
@@ -2226,10 +2207,7 @@ static void xdg_toplevel_request_minimize(
 	minimize_toplevel(toplevel);
 }
 
-/*
- * Unconstrain a new popup via its positioner before the first configure,
- * so clients size themselves correctly from the start.
- */
+/* Unconstrain a new popup via its positioner before the first configure, so clients size themselves correctly from the start. */
 static void unconstrain_new_popup(struct tinywl_server *server,
 		struct wlr_xdg_surface *xdg_surface, struct wlr_scene_tree *parent_tree) {
 	struct wlr_box out_box = {0};
@@ -2528,23 +2506,17 @@ int main(int argc, char *argv[]) {
 		/* Non-fatal: compositor runs fine without them */
 	}
 
-	/* Hook up X11 app window handling (see the "XWayland toplevel support"
-	 * block above xdg_toplevel_destroy). Without this, X11 clients (e.g.
-	 * apps without native Wayland support) create a surface that never
-	 * gets displayed: the process runs but no window ever appears. */
+	/* Hook up X11 window handling (see XWayland toplevel support above); 
+	without it X11 clients run but never display a window. */
 	struct wlr_xwayland *xwayland = tinywl_services_get_xwayland(server.services);
 	if (xwayland) {
 		server.new_xwayland_surface.notify = new_xwayland_surface;
 		wl_signal_add(&xwayland->events.new_surface, &server.new_xwayland_surface);
 	}
 
-	/* Registered here, not earlier: wl_event_loop_add_signal() blocks SIGCHLD
-	 * in this process's signal mask, and every fork() after that point
-	 * inherits the block — including wlroots' own internal fork of the
-	 * Xwayland process (started just above, inside tinywl_services_init()).
-	 * Registering it before Xwayland starts left Xwayland with SIGCHLD
-	 * blocked, breaking its own child handling and making wlroots' own
-	 * waitpid() on it fail with ECHILD. */
+	/* Registered after XWayland starts: wl_event_loop_add_signal() blocks SIGCHLD 
+	for this process and everything it forks afterward, including wlroots' 
+	own Xwayland child, which needs it unblocked. */
 	wl_event_loop_add_signal(term_loop, SIGCHLD, handle_sigchld, &server);
 
 	/* Load the wallpaper; must run after the backend starts and WAYLAND_DISPLAY is set. */
@@ -2580,18 +2552,11 @@ int main(int argc, char *argv[]) {
 	 */
 	cleanup_wayland_socket_files();
 
-	/* Destroy background services (including XWayland) BEFORE tearing down
-	 * all Wayland clients. XWayland is itself a wayland client of ours; if
-	 * wl_display_destroy_clients() severs that connection first, wlroots
-	 * has no way to know this is an intentional shutdown and treats it as
-	 * a crash, auto-restarting Xwayland mid-teardown (visible in logs as
-	 * "Restarting Xwayland" / "cannot destroy all clients because new ones
-	 * were created by destroy callbacks") — which left the compositor
-	 * tangled up and never exiting. wlr_xwayland_destroy() (called inside
-	 * tinywl_services_destroy()) must run first so wlroots tears XWayland
-	 * down cleanly instead of trying to respawn it.
-	 * Once wl_display_run returns, we shut down services, then destroy all
-	 * remaining clients, then shut down the server. */
+	/*
+	 * Destroy background services (including XWayland) before tearing down Wayland
+	 * clients, or wlroots sees XWayland's connection die unexpectedly and
+	 * auto-restarts it mid-teardown, hanging shutdown.
+	 */
 	tinywl_services_destroy(server.services);
 	wl_display_destroy_clients(server.wl_display);
 	tinywl_panel_destroy(server.panel);

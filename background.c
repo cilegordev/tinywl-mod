@@ -1,6 +1,6 @@
-/*
- * background.c: wallpaper rendering. PNG -> Cairo surface -> wl_shm buffer -> wlr_scene_buffer.
- * Falls back to a solid dark-grey rect if the PNG can't be loaded or uploaded.
+/* 
+ * background.c: wallpaper rendering (PNG -> Cairo -> wl_shm -> wlr_scene_buffer), 
+ * falls back to a solid grey rect. 
  */
 
 #define _GNU_SOURCE

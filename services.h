@@ -13,25 +13,28 @@ struct tinywl_services *tinywl_services_init(struct tinywl_server *server);
 
 void tinywl_services_destroy(struct tinywl_services *svc);
 
-/* Reap only the child PIDs we recorded ourselves (dbus-daemon, polkit-agent,
- * xfsettingsd, gvfsd, etc). Never call waitpid(-1, ...) anywhere else in the
- * compositor: other subsystems (e.g. wlroots' Xwayland) fork and waitpid()
- * their own children, and a blanket wait would steal that reap out from
- * under them, making them think their child died unexpectedly. */
+/* 
+ * Reap only child PIDs we recorded ourselves; other subsystems 
+ * (e.g. wlroots' Xwayland) reap their own, and a blanket wait would steal that from them. 
+ */
 void tinywl_services_try_reap(struct tinywl_services *svc);
 
-/* Register an ad-hoc forked child (e.g. an app launched from the menu, or
- * the Print-key screenshot helper) so tinywl_services_try_reap() will also
- * reap it. Without this, any child forked outside services.c is invisible
- * to the reaper and becomes a permanent zombie once it exits. */
+/* 
+ * Register an ad-hoc forked child (menu launches, screenshot helper) 
+ * so tinywl_services_try_reap() reaps it too, instead of leaving a zombie. 
+ */
 void tinywl_services_track_pid(struct tinywl_services *svc, pid_t pid, const char *name);
 
-/* True if `backend` is (or, wrapped in a multi-backend, contains) a nested X11/Wayland backend rather than real DRM/KMS. */
+/* 
+ * True if `backend` is (or, wrapped in a multi-backend, contains) 
+ * a nested X11/Wayland backend rather than real DRM/KMS. 
+ */
 bool tinywl_backend_is_nested(struct wlr_backend *backend);
 
 /* Returns the wlr_xwayland instance owned by these services (or NULL if
  * XWayland isn't running), so the caller can hook its own listeners
- * (e.g. events.new_surface) onto it. */
+ * (e.g. events.new_surface) onto it. 
+ */
 struct wlr_xwayland *tinywl_services_get_xwayland(struct tinywl_services *svc);
 
 #endif

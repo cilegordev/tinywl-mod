@@ -95,12 +95,10 @@ static void record_pid(struct tinywl_services *svc, pid_t pid, const char *name)
     svc->count++;
 }
 
-/* tinywl_services_try_reap: reap only PIDs we recorded ourselves. Called from
- * the compositor's SIGCHLD handler. Deliberately targeted (waitpid on each
- * known pid) rather than waitpid(-1, ...), which would also reap children
- * other subsystems own (e.g. wlroots forks and waits on its own Xwayland
- * child; a blanket wait races with that and makes wlroots think Xwayland
- * died, tearing the whole X11 connection down). */
+/* 
+ * Reap only PIDs we recorded ourselves; never waitpid(-1, ...), 
+ * or it races with other subsystems' own child reaping (e.g. wlroots' Xwayland child). 
+ */
 void tinywl_services_try_reap(struct tinywl_services *svc) {
     if (!svc)
         return;
@@ -137,12 +135,11 @@ static pid_t spawn_service(const char *name, char *const argv[]) {
         return -1;
     }
     if (pid == 0) {
-        /* Unblock all signals: wl_event_loop_add_signal() blocks SIGINT/
-         * SIGTERM/SIGCHLD at the process level so it can deliver them via
-         * the wayland event loop, and fork() inherits that blocked mask.
-         * Spawned services must not inherit it — e.g. the polkit agent's
-         * own SIGCHLD-based child-watch handling breaks if SIGCHLD stays
-         * blocked, which is what caused deny clicks to hang. */
+        /*
+         * Unblock all signals: wl_event_loop_add_signal() blocks SIGINT/SIGTERM/SIGCHLD
+         * and fork() inherits that. Spawned services must not inherit the block,
+         * or their own child-watch handling (e.g. polkit's) breaks.
+         */
         sigset_t empty_mask;
         sigemptyset(&empty_mask);
         sigprocmask(SIG_SETMASK, &empty_mask, NULL);
@@ -373,13 +370,11 @@ static void start_gvfs(struct tinywl_services *svc) {
 
 /* Polkit authentication agent */
 
-/* is_process_running_named: scan /proc for a process whose comm matches
- * `name` (comm is truncated to 15 chars by the kernel, so compare only up
- * to that length). Used to avoid spawning a second polkit agent on top of
- * one left over from a previous session — two agents racing to answer the
- * same authorization request is what causes the "deny does nothing /
- * freezes" symptom, since the second one hangs waiting on a D-Bus reply
- * for a check the first agent already resolved. */
+/*
+ * Scan /proc for a running process named `name` (kernel truncates comm to
+ * 15 chars). Avoids spawning a second polkit agent, which causes
+ * "deny does nothing" when two agents race for the same auth request.
+ */
 static bool is_process_running_named(const char *name) {
     DIR *proc = opendir("/proc");
     if (!proc)
@@ -493,7 +488,9 @@ struct tinywl_services *tinywl_services_init(struct tinywl_server *server) {
 
     svc->server = server;
 
-    /* Skip per-session daemons (settings, GVFS, polkit, audio) when nested inside an existing X11 session, since the host already runs them on the shared D-Bus bus. */
+    /* Skip per-session daemons (settings, GVFS, polkit, audio) when nested inside an existing X11 session, 
+     * since the host already runs them on the shared D-Bus bus. 
+     */
     bool nested = tinywl_backend_is_nested(server->backend);
     if (nested) {
         wlr_log(WLR_INFO,
