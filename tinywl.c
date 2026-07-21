@@ -1130,7 +1130,8 @@ static void raise_dialogs_to_front(struct tinywl_server *server) {
 	/* Raise all dialog windows to the top of the stack to keep them visible
 	 * above progress windows and other background windows */
 	struct tinywl_toplevel *toplevel;
-	wl_list_for_each(toplevel, &server->toplevels, link) {
+	/* Reverse order so the most recent dialog ends up raised last (on top). */
+	wl_list_for_each_reverse(toplevel, &server->toplevels, link) {
 		if (toplevel->is_dialog) {
 			wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
 		}
