@@ -121,12 +121,6 @@ void tinywl_services_track_pid(struct tinywl_services *svc, pid_t pid, const cha
     record_pid(svc, pid, name ? name : "ad-hoc");
 }
 
-struct wlr_xwayland *tinywl_services_get_xwayland(struct tinywl_services *svc) {
-    if (!svc)
-        return NULL;
-    return svc->xwayland;
-}
-
 /* spawn_service: fork+exec argv (NULL-terminated). Returns the child PID, or -1 on failure. */
 static pid_t spawn_service(const char *name, char *const argv[]) {
     pid_t pid = fork();

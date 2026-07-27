@@ -74,7 +74,6 @@ struct tinywl_server {
 
     struct wlr_xdg_shell          *xdg_shell;
     struct wl_listener             new_xdg_surface;
-    struct wl_listener             new_xwayland_surface;
     struct wl_list                 toplevels;
     struct wl_list                 popups;
 
@@ -146,8 +145,7 @@ struct tinywl_output {
 struct tinywl_toplevel {
     struct wl_list              link;
     struct tinywl_server       *server;
-    struct wlr_xdg_toplevel    *xdg_toplevel;       /* NULL for XWayland-backed toplevels */
-    struct wlr_xwayland_surface *xwayland_surface;  /* NULL for xdg-shell-backed toplevels */
+    struct wlr_xdg_toplevel    *xdg_toplevel;
     struct wlr_scene_tree      *scene_tree;
     struct wl_listener          map;
     struct wl_listener          unmap;
@@ -157,9 +155,6 @@ struct tinywl_toplevel {
     struct wl_listener          request_maximize;
     struct wl_listener          request_fullscreen;
     struct wl_listener          request_minimize;
-    struct wl_listener          xwayland_request_configure; /* XWayland-only */
-    struct wl_listener          xwayland_associate;         /* XWayland-only */
-    struct wl_listener          xwayland_dissociate;        /* XWayland-only */
 
     /* Maximize state */
     bool            maximized;

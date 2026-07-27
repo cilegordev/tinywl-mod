@@ -37,11 +37,6 @@ static struct tinywl_toplevel *desktop_toplevel_at(
 		struct tinywl_server *server, double lx, double ly,
 		struct wlr_surface **surface, double *sx, double *sy);
 
-/* Forward declaration: needed by the xwayland request_move/request_resize
- * handlers, which are defined earlier in the file than begin_interactive. */
-static void begin_interactive(struct tinywl_toplevel *toplevel,
-		enum tinywl_cursor_mode mode, uint32_t edges);
-
 /* Handle SIGINT/SIGTERM by calling wl_display_terminate() so wl_display_destroy() runs and cleans up the Wayland socket files. */
 static int handle_term_signal(int signal_number, void *data) {
 	struct wl_display *display = data;
@@ -226,66 +221,6 @@ static void popup_handle_map(struct wl_listener *listener, void *data) {
 	raise_popup_owner_above_panel(popup);
 }
 
-/* Get the wlr_surface for either an xdg-shell or an XWayland toplevel. */
-static struct wlr_surface *toplevel_wlr_surface(struct tinywl_toplevel *toplevel) {
-	if (!toplevel) {
-		return NULL;
-	}
-	if (toplevel->xdg_toplevel) {
-		return toplevel->xdg_toplevel->base->surface;
-	}
-	if (toplevel->xwayland_surface) {
-		return toplevel->xwayland_surface->surface;
-	}
-	return NULL;
-}
-
-/* Activates/deactivates a toplevel regardless of which protocol backs it. */
-static void toplevel_set_activated(struct tinywl_toplevel *toplevel, bool activated) {
-	if (!toplevel) {
-		return;
-	}
-	if (toplevel->xdg_toplevel) {
-		wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, activated);
-	} else if (toplevel->xwayland_surface) {
-		wlr_xwayland_surface_activate(toplevel->xwayland_surface, activated);
-	}
-}
-
-/* 
- * Returns the toplevel's content geometry regardless of protocol. XWayland
- * surfaces have no separate "geometry offset" concept the way xdg-shell
- * does, so it's just (0, 0, width, height). 
- */
-static void toplevel_get_geometry(struct tinywl_toplevel *toplevel, struct wlr_box *box) {
-	if (toplevel->xdg_toplevel) {
-		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, box);
-	} else if (toplevel->xwayland_surface) {
-		box->x = 0;
-		box->y = 0;
-		box->width = toplevel->xwayland_surface->width;
-		box->height = toplevel->xwayland_surface->height;
-	} else {
-		box->x = box->y = box->width = box->height = 0;
-	}
-}
-
-/* 
- * Resize a toplevel regardless of protocol; assumes the scene node position is already 
- * set (XWayland needs position+size together, xdg-shell only negotiates size). 
- */
-static void toplevel_set_size(struct tinywl_toplevel *toplevel, int width, int height) {
-	if (width < 1) width = 1;
-	if (height < 1) height = 1;
-	if (toplevel->xdg_toplevel) {
-		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, width, height);
-	} else if (toplevel->xwayland_surface) {
-		wlr_xwayland_surface_configure(toplevel->xwayland_surface,
-			toplevel->scene_tree->node.x, toplevel->scene_tree->node.y,
-			width, height);
-	}
-}
-
 static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
 	if (toplevel == NULL) {
@@ -304,12 +239,6 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface 
 			wlr_xdg_toplevel_try_from_wlr_surface(prev_surface);
 		if (prev_toplevel != NULL) {
 			wlr_xdg_toplevel_set_activated(prev_toplevel, false);
-		} else {
-			struct wlr_xwayland_surface *prev_xwayland =
-				wlr_xwayland_surface_try_from_wlr_surface(prev_surface);
-			if (prev_xwayland != NULL) {
-				wlr_xwayland_surface_activate(prev_xwayland, false);
-			}
 		}
 	}
 	struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
@@ -333,29 +262,13 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel, struct wlr_surface 
 	}
 	
 	/* Activate the new surface */
-	toplevel_set_activated(toplevel, true);
+	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
 	/* Update the taskbar highlight to reflect the newly focused window */
 	tinywl_panel_on_focus(server->panel, toplevel);
 	/* Give the surface keyboard focus through the seat. */
 	if (keyboard != NULL) {
-		/* Tab may still be physically down mid Alt+Tab, but we never forward
-		 * its press/release to clients — so exclude it here too, or XWayland
-		 * clients (e.g. Chrome) auto-repeat it forever since they never see
-		 * the release. */
-		uint32_t filtered[32];
-		size_t nfiltered = 0;
-		for (size_t i = 0; i < keyboard->num_keycodes && nfiltered < 32; i++) {
-			uint32_t kc = keyboard->keycodes[i];
-			const xkb_keysym_t *syms;
-			int n = xkb_state_key_get_syms(keyboard->xkb_state, kc + 8, &syms);
-			bool is_tab = false;
-			for (int j = 0; j < n; j++) {
-				if (syms[j] == XKB_KEY_Tab) { is_tab = true; break; }
-			}
-			if (!is_tab) filtered[nfiltered++] = kc;
-		}
-		wlr_seat_keyboard_notify_enter(seat, toplevel_wlr_surface(toplevel),
-			filtered, nfiltered, &keyboard->modifiers);
+		wlr_seat_keyboard_notify_enter(seat, toplevel->xdg_toplevel->base->surface,
+			keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
 	}
 }
 
@@ -419,7 +332,7 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 		}
 		struct tinywl_toplevel *next_toplevel =
 			wl_container_of(server->toplevels.prev, next_toplevel, link);
-		focus_toplevel(next_toplevel, toplevel_wlr_surface(next_toplevel));
+		focus_toplevel(next_toplevel, next_toplevel->xdg_toplevel->base->surface);
 		break;
 	default:
 		return false;
@@ -922,13 +835,13 @@ static void process_cursor_resize(struct tinywl_server *server, uint32_t time) {
 	}
 
 	struct wlr_box geo_box;
-	toplevel_get_geometry(toplevel, &geo_box);
+	wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
 	wlr_scene_node_set_position(&toplevel->scene_tree->node,
 		new_left - geo_box.x, new_top - geo_box.y);
 
 	int new_width = new_right - new_left;
 	int new_height = new_bottom - new_top;
-	toplevel_set_size(toplevel, new_width, new_height);
+	wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, new_width, new_height);
 }
 
 static void handle_pointer_grab_surface_destroy(struct wl_listener *listener, void *data) {
@@ -1692,7 +1605,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		}
 
 		if (next) {
-			focus_toplevel(next, toplevel_wlr_surface(next));
+			focus_toplevel(next, next->xdg_toplevel->base->surface);
 		} else {
 			wlr_seat_keyboard_notify_clear_focus(server->seat);
 			tinywl_panel_on_focus(server->panel, NULL);
@@ -1719,366 +1632,15 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	free(toplevel);
 }
 
-/*
- * XWayland toplevel support: mirrors the xdg_toplevel map/unmap/destroy
- * handling above so X11 windows actually get a scene node and become
- * visible/focusable/closable. Taskbar entries, saved state, and CSD-driven
- * move/resize/maximize are xdg-shell-only and not covered here.
- */
-
-static void xwayland_surface_request_configure(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *toplevel =
-		wl_container_of(listener, toplevel, xwayland_request_configure);
-	struct wlr_xwayland_surface *xsurface = toplevel->xwayland_surface;
-	struct wlr_xwayland_surface_configure_event *event = data;
-
-	int x = event->x;
-	int y = event->y;
-	int width = event->width;
-	int height = event->height;
-
-	if (!xsurface->override_redirect) {
-		struct tinywl_server *server = toplevel->server;
-		struct wlr_box out_box;
-		int out_w, out_h;
-		if (get_primary_output_box(server, &out_box, &out_w, &out_h)) {
-			/* 
-			 * Clamp to the usable area, same as the initial map, 
-			 * so a client resizing/maximizing itself doesn't push itself off-screen. 
-			 */
-			int panel_height = tinywl_panel_get_height(server->panel);
-			int max_width = out_w - 40;
-			int max_height = out_h - panel_height - 40;
-			if (width > max_width) width = max_width;
-			if (height > max_height) height = max_height;
-			if (x + width > out_box.x + out_w) x = out_box.x + out_w - width;
-			if (x < out_box.x) x = out_box.x;
-			if (y + height > out_box.y + out_h - panel_height) {
-				y = out_box.y + out_h - panel_height - height;
-			}
-			if (y < out_box.y) y = out_box.y;
-		}
-	}
-
-	wlr_xwayland_surface_configure(xsurface, x, y, width, height);
-	if (toplevel->scene_tree) {
-		wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
-	}
-}
-
-static void xwayland_surface_map(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, map);
-	struct tinywl_server *server = toplevel->server;
-	struct wlr_xwayland_surface *xsurface = toplevel->xwayland_surface;
-
-	toplevel->scene_tree = wlr_scene_tree_create(&server->scene->tree);
-	wlr_scene_subsurface_tree_create(toplevel->scene_tree, xsurface->surface);
-
-	int x = xsurface->x;
-	int y = xsurface->y;
-	if (!xsurface->override_redirect) {
-		struct wlr_box out_box;
-		int out_w, out_h;
-		if (get_primary_output_box(server, &out_box, &out_w, &out_h)) {
-			/* 
-			 * Constrain to fit on screen like xdg_toplevel_map does for dialogs, 
-			 * so a client requesting an oversized window doesn't clip off-screen once centered. 
-			 */
-			int panel_height = tinywl_panel_get_height(server->panel);
-			int max_width = out_w - 40;
-			int max_height = out_h - panel_height - 40;
-
-			int width = xsurface->width;
-			int height = xsurface->height;
-			if (width > max_width) width = max_width;
-			if (height > max_height) height = max_height;
-
-			if (width != xsurface->width || height != xsurface->height) {
-				wlr_xwayland_surface_configure(xsurface, xsurface->x, xsurface->y,
-					width, height);
-			}
-
-			if (x <= 0 && y <= 0) {
-				/* No sane position requested: center it like an xdg dialog. */
-				x = out_box.x + (out_w - width) / 2;
-				y = out_box.y + (out_h - panel_height - height) / 2;
-			}
-		}
-	}
-	wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
-
-	/* Skip invisible helper windows (WM_HINTS.input=False) from Alt+Tab/taskbar. */
-	bool wants_focus = true;
-	if (xsurface->hints && (xsurface->hints->flags & XCB_ICCCM_WM_HINT_INPUT)) {
-		wants_focus = xsurface->hints->input;
-	}
-
-	if (!xsurface->override_redirect && wants_focus) {
-		/*
-		 * Only non-override-redirect windows are focusable toplevels (node.data set,
-		 * inserted into server->toplevels). Override-redirect windows (popup menus)
-		 * get a scene node but stay click-through: their ->link is never inserted,
-		 * so resolving a click to them and calling focus_toplevel() would corrupt
-		 * an uninitialized list node.
-		 */
-		toplevel->scene_tree->node.data = toplevel;
-		/* Tail, not head — see the xdg_toplevel_map comment on the same
-		 * pattern: only focus_toplevel() should promote a toplevel to the
-		 * front of the focus-order list. */
-		wl_list_insert(server->toplevels.prev, &toplevel->link);
-
-		/* Register this window in the taskbar (was previously skipped for
-		 * XWayland clients such as Chrome, so they never appeared in the panel). */
-		tinywl_panel_on_map(server->panel, toplevel);
-		focus_toplevel(toplevel, xsurface->surface);
-	}
-}
-
-static void xwayland_surface_unmap(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
-	struct tinywl_server *server = toplevel->server;
-	struct wlr_xwayland_surface *xsurface = toplevel->xwayland_surface;
-
-	if (toplevel == server->grabbed_toplevel) {
-		reset_cursor_mode(server);
-	}
-
-	bool was_focused = server->seat->keyboard_state.focused_surface ==
-			toplevel_wlr_surface(toplevel);
-
-	if (!xsurface->override_redirect) {
-		tinywl_panel_on_unmap(server->panel, toplevel);
-		wl_list_remove(&toplevel->link);
-		wl_list_init(&toplevel->link);
-	}
-
-	if (toplevel->scene_tree) {
-		wlr_scene_node_destroy(&toplevel->scene_tree->node);
-		toplevel->scene_tree = NULL;
-	}
-
-	if (was_focused) {
-		struct tinywl_toplevel *next = NULL;
-		struct tinywl_toplevel *t;
-		wl_list_for_each(t, &server->toplevels, link) {
-			if (!t->minimized) {
-				next = t;
-				break;
-			}
-		}
-		if (next) {
-			focus_toplevel(next, toplevel_wlr_surface(next));
-		} else {
-			wlr_seat_keyboard_notify_clear_focus(server->seat);
-			tinywl_panel_on_focus(server->panel, NULL);
-		}
-	}
-}
-
-static void xwayland_surface_associate(struct wl_listener *listener, void *data) {
-	/* xsurface->surface only becomes valid between associate and dissociate;
-	 * that's when we can hook the generic wlr_surface map/unmap events. */
-	struct tinywl_toplevel *toplevel =
-		wl_container_of(listener, toplevel, xwayland_associate);
-	struct wlr_xwayland_surface *xsurface = toplevel->xwayland_surface;
-
-	toplevel->map.notify = xwayland_surface_map;
-	wl_signal_add(&xsurface->surface->events.map, &toplevel->map);
-	toplevel->unmap.notify = xwayland_surface_unmap;
-	wl_signal_add(&xsurface->surface->events.unmap, &toplevel->unmap);
-}
-
-static void xwayland_surface_dissociate(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *toplevel =
-		wl_container_of(listener, toplevel, xwayland_dissociate);
-	wl_list_remove(&toplevel->map.link);
-	wl_list_remove(&toplevel->unmap.link);
-}
-
-static void xwayland_surface_destroy(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
-
-	/* Defensive cleanup: unmap may never fire if the surface is destroyed while still mapped (e.g. wlr_xwayland_destroy() during shutdown); leaving a dangling scene node/list entry caused shutdown hangs. */
-	if (toplevel->link.next != &toplevel->link) {
-		wl_list_remove(&toplevel->link);
-	}
-	if (toplevel->scene_tree) {
-		wlr_scene_node_destroy(&toplevel->scene_tree->node);
-		toplevel->scene_tree = NULL;
-	}
-
-	wl_list_remove(&toplevel->xwayland_associate.link);
-	wl_list_remove(&toplevel->xwayland_dissociate.link);
-	wl_list_remove(&toplevel->xwayland_request_configure.link);
-	wl_list_remove(&toplevel->request_move.link);
-	wl_list_remove(&toplevel->request_resize.link);
-	wl_list_remove(&toplevel->request_maximize.link);
-	wl_list_remove(&toplevel->request_fullscreen.link);
-	wl_list_remove(&toplevel->destroy.link);
-
-	free(toplevel);
-}
-
-static void xwayland_surface_request_move(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, request_move);
-	begin_interactive(toplevel, TINYWL_CURSOR_MOVE, 0);
-}
-
-static void xwayland_surface_request_resize(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, request_resize);
-	struct wlr_xwayland_resize_event *event = data;
-	begin_interactive(toplevel, TINYWL_CURSOR_RESIZE, event->edges);
-}
-
-static void xwayland_surface_request_maximize(struct wl_listener *listener, void *data) {
-	/* Mirrors toggle_maximize()'s xdg logic, dispatched for XWayland.
-	 * wlroots already updates xsurface->maximized_horz/vert to reflect what
-	 * the client is asking for before emitting this event. */
-	struct tinywl_toplevel *toplevel =
-		wl_container_of(listener, toplevel, request_maximize);
-	struct wlr_xwayland_surface *xsurface = toplevel->xwayland_surface;
-	struct tinywl_server *server = toplevel->server;
-
-	if (!toplevel->scene_tree) {
-		/* Not mapped yet (e.g. client requests "start maximized" before its
-		 * window is ever shown) — nothing to resize/reposition yet. */
-		return;
-	}
-
-	bool want_maximized = xsurface->maximized_horz && xsurface->maximized_vert;
-
-	if (want_maximized == toplevel->maximized) {
-		return;
-	}
-
-	if (toplevel->maximized) {
-		/* Restore to saved geometry */
-		wlr_xwayland_surface_set_maximized(xsurface, false);
-		wlr_scene_node_set_position(&toplevel->scene_tree->node,
-			toplevel->saved_geometry.x, toplevel->saved_geometry.y);
-		toplevel_set_size(toplevel, toplevel->saved_geometry.width,
-			toplevel->saved_geometry.height);
-		toplevel->maximized = false;
-	} else {
-		if (!toplevel->snapped) {
-			struct wlr_box geo;
-			toplevel_get_geometry(toplevel, &geo);
-			toplevel->saved_geometry.x = toplevel->scene_tree->node.x;
-			toplevel->saved_geometry.y = toplevel->scene_tree->node.y;
-			toplevel->saved_geometry.width = geo.width;
-			toplevel->saved_geometry.height = geo.height;
-		}
-		toplevel->snapped = false;
-		toplevel->snapped_zone = TINYWL_SNAP_NONE;
-
-		struct wlr_box out_box;
-		int out_w, out_h;
-		if (get_primary_output_box(server, &out_box, &out_w, &out_h)) {
-			int panel_height = tinywl_panel_get_height(server->panel);
-			wlr_scene_node_set_position(&toplevel->scene_tree->node,
-				out_box.x, out_box.y);
-			wlr_xwayland_surface_set_maximized(xsurface, true);
-			toplevel_set_size(toplevel, out_w, out_h - panel_height);
-		}
-		toplevel->maximized = true;
-	}
-}
-
-static void xwayland_surface_request_fullscreen(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *toplevel =
-		wl_container_of(listener, toplevel, request_fullscreen);
-	struct wlr_xwayland_surface *xsurface = toplevel->xwayland_surface;
-	struct tinywl_server *server = toplevel->server;
-
-	if (!toplevel->scene_tree) {
-		/* Not mapped yet — see the matching guard in request_maximize. */
-		return;
-	}
-
-	bool want_fullscreen = xsurface->fullscreen;
-
-	if (want_fullscreen == toplevel->fullscreen) {
-		return;
-	}
-
-	if (toplevel->fullscreen) {
-		wlr_xwayland_surface_set_fullscreen(xsurface, false);
-		wlr_scene_node_set_position(&toplevel->scene_tree->node,
-			toplevel->saved_geometry_fullscreen.x,
-			toplevel->saved_geometry_fullscreen.y);
-		toplevel_set_size(toplevel, toplevel->saved_geometry_fullscreen.width,
-			toplevel->saved_geometry_fullscreen.height);
-		toplevel->fullscreen = false;
-		tinywl_panel_show(server->panel);
-	} else {
-		struct wlr_box geo;
-		toplevel_get_geometry(toplevel, &geo);
-		toplevel->saved_geometry_fullscreen.x = toplevel->scene_tree->node.x;
-		toplevel->saved_geometry_fullscreen.y = toplevel->scene_tree->node.y;
-		toplevel->saved_geometry_fullscreen.width = geo.width;
-		toplevel->saved_geometry_fullscreen.height = geo.height;
-
-		struct wlr_box out_box;
-		int out_w, out_h;
-		if (get_primary_output_box(server, &out_box, &out_w, &out_h)) {
-			wlr_scene_node_set_position(&toplevel->scene_tree->node,
-				out_box.x, out_box.y);
-			wlr_xwayland_surface_set_fullscreen(xsurface, true);
-			toplevel_set_size(toplevel, out_w, out_h);
-		}
-		toplevel->fullscreen = true;
-		tinywl_panel_hide(server->panel);
-	}
-}
-
-static void new_xwayland_surface(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server =
-		wl_container_of(listener, server, new_xwayland_surface);
-	struct wlr_xwayland_surface *xsurface = data;
-
-	struct tinywl_toplevel *toplevel = calloc(1, sizeof(*toplevel));
-	if (!toplevel) {
-		wlr_log(WLR_ERROR, "Failed to allocate memory for xwayland toplevel");
-		return;
-	}
-	toplevel->server = server;
-	toplevel->xdg_toplevel = NULL;
-	toplevel->xwayland_surface = xsurface;
-	xsurface->data = toplevel;
-	wl_list_init(&toplevel->link);
-
-	toplevel->xwayland_associate.notify = xwayland_surface_associate;
-	wl_signal_add(&xsurface->events.associate, &toplevel->xwayland_associate);
-	toplevel->xwayland_dissociate.notify = xwayland_surface_dissociate;
-	wl_signal_add(&xsurface->events.dissociate, &toplevel->xwayland_dissociate);
-	toplevel->destroy.notify = xwayland_surface_destroy;
-	wl_signal_add(&xsurface->events.destroy, &toplevel->destroy);
-	toplevel->xwayland_request_configure.notify = xwayland_surface_request_configure;
-	wl_signal_add(&xsurface->events.request_configure,
-		&toplevel->xwayland_request_configure);
-	toplevel->request_move.notify = xwayland_surface_request_move;
-	wl_signal_add(&xsurface->events.request_move, &toplevel->request_move);
-	toplevel->request_resize.notify = xwayland_surface_request_resize;
-	wl_signal_add(&xsurface->events.request_resize, &toplevel->request_resize);
-	toplevel->request_maximize.notify = xwayland_surface_request_maximize;
-	wl_signal_add(&xsurface->events.request_maximize, &toplevel->request_maximize);
-	toplevel->request_fullscreen.notify = xwayland_surface_request_fullscreen;
-	wl_signal_add(&xsurface->events.request_fullscreen, &toplevel->request_fullscreen);
-}
-
 static void begin_interactive(struct tinywl_toplevel *toplevel,
 		enum tinywl_cursor_mode mode, uint32_t edges) {
 	/* This function sets up an interactive move or resize operation, where the
 	 * compositor stops propegating pointer events to clients and instead
 	 * consumes them itself, to move or resize windows. */
-	if (!toplevel->scene_tree) {
-		/* Not mapped yet — nothing to move/resize. */
-		return;
-	}
 	struct tinywl_server *server = toplevel->server;
 	struct wlr_surface *focused_surface =
 		server->seat->pointer_state.focused_surface;
-	if (toplevel_wlr_surface(toplevel) !=
+	if (toplevel->xdg_toplevel->base->surface !=
 			wlr_surface_get_root_surface(focused_surface)) {
 		/* Deny move/resize requests from unfocused clients. */
 		return;
@@ -2090,7 +1652,7 @@ static void begin_interactive(struct tinywl_toplevel *toplevel,
 		if (toplevel->snapped) {
 			/* Restore pre-snap size before dragging, so grabbing a snapped titlebar un-snaps it. */
 			struct wlr_box cur_geo;
-			toplevel_get_geometry(toplevel, &cur_geo);
+			wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &cur_geo);
 			int cur_x = toplevel->scene_tree->node.x;
 			int cur_w = cur_geo.width > 0 ? cur_geo.width : 1;
 
@@ -2105,8 +1667,8 @@ static void begin_interactive(struct tinywl_toplevel *toplevel,
 			int new_x = (int)(server->cursor->x - rel_x * new_w);
 			int new_y = (int)server->cursor->y - 10;
 
+			wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, new_w, new_h);
 			wlr_scene_node_set_position(&toplevel->scene_tree->node, new_x, new_y);
-			toplevel_set_size(toplevel, new_w, new_h);
 
 			toplevel->snapped = false;
 			toplevel->snapped_zone = TINYWL_SNAP_NONE;
@@ -2116,7 +1678,7 @@ static void begin_interactive(struct tinywl_toplevel *toplevel,
 		server->grab_y = server->cursor->y - toplevel->scene_tree->node.y;
 	} else {
 		struct wlr_box geo_box;
-		toplevel_get_geometry(toplevel, &geo_box);
+		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
 
 		double border_x = (toplevel->scene_tree->node.x + geo_box.x) +
 			((edges & WLR_EDGE_RIGHT) ? geo_box.width : 0);
@@ -2154,7 +1716,7 @@ void minimize_toplevel(struct tinywl_toplevel *toplevel) {
 		return;
 	toplevel->minimized = true;
 	wlr_scene_node_set_enabled(&toplevel->scene_tree->node, false);
-	toplevel_set_activated(toplevel, false);
+	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, false);
 
 	/* Pass keyboard focus to the next visible (non-minimized) window */
 	struct tinywl_server *server = toplevel->server;
@@ -2167,7 +1729,7 @@ void minimize_toplevel(struct tinywl_toplevel *toplevel) {
 		}
 	}
 	if (next) {
-		focus_toplevel(next, toplevel_wlr_surface(next));
+		focus_toplevel(next, next->xdg_toplevel->base->surface);
 	} else {
 		wlr_seat_keyboard_notify_clear_focus(server->seat);
 		tinywl_panel_on_focus(server->panel, NULL);
@@ -2181,14 +1743,14 @@ void restore_toplevel(struct tinywl_toplevel *toplevel) {
 	/* Restore a minimized window and give it focus. */
 	if (!toplevel->minimized) {
 		/* Not minimized — just focus */
-		focus_toplevel(toplevel, toplevel_wlr_surface(toplevel));
+		focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
 		return;
 	}
 	toplevel->minimized = false;
 	wlr_scene_node_set_enabled(&toplevel->scene_tree->node, true);
 	wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
 	tinywl_panel_raise_to_top(toplevel->server->panel);
-	focus_toplevel(toplevel, toplevel_wlr_surface(toplevel));
+	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
 	
 	/* Save the restored state */
 	save_window_state(toplevel);
@@ -2534,14 +2096,6 @@ int main(int argc, char *argv[]) {
 		/* Non-fatal: compositor runs fine without them */
 	}
 
-	/* Hook up X11 window handling (see XWayland toplevel support above); 
-	without it X11 clients run but never display a window. */
-	struct wlr_xwayland *xwayland = tinywl_services_get_xwayland(server.services);
-	if (xwayland) {
-		server.new_xwayland_surface.notify = new_xwayland_surface;
-		wl_signal_add(&xwayland->events.new_surface, &server.new_xwayland_surface);
-	}
-
 	/* Registered after XWayland starts: wl_event_loop_add_signal() blocks SIGCHLD 
 	for this process and everything it forks afterward, including wlroots' 
 	own Xwayland child, which needs it unblocked. */
@@ -2580,11 +2134,7 @@ int main(int argc, char *argv[]) {
 	 */
 	cleanup_wayland_socket_files();
 
-	/*
-	 * Destroy background services (including XWayland) before tearing down Wayland
-	 * clients, or wlroots sees XWayland's connection die unexpectedly and
-	 * auto-restarts it mid-teardown, hanging shutdown.
-	 */
+	/* Destroy background services (including XWayland) BEFORE shutdown */
 	tinywl_services_destroy(server.services);
 	wl_display_destroy_clients(server.wl_display);
 	tinywl_panel_destroy(server.panel);
