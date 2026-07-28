@@ -2136,10 +2136,10 @@ int main(int argc, char *argv[]) {
 
 	/* Destroy background services (including XWayland) BEFORE shutdown */
 	tinywl_services_destroy(server.services);
-	wl_display_destroy_clients(server.wl_display);
 	tinywl_panel_destroy(server.panel);
 	tinywl_background_destroy(server.background);
 	tinywl_menu_destroy(server.menu);
+	wl_display_destroy_clients(server.wl_display);
 	wlr_scene_node_destroy(&server.scene->tree.node);
 	wlr_xcursor_manager_destroy(server.cursor_mgr);
 	wlr_output_layout_destroy(server.output_layout);
